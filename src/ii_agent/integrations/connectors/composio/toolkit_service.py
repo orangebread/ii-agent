@@ -98,7 +98,16 @@ class ToolkitService:
         self, *, cache_service: ComposioCacheService | None = None, api_key: str | None = None
     ) -> None:
         self._cache_service = cache_service
-        self.client = ComposioClient.get_client(api_key)
+        self._api_key = api_key
+        self.client = None
+
+    def _get_client(self):
+        if self.client is None:
+            self.client = ComposioClient.get_client(getattr(self, "_api_key", None))
+        return self.client
+
+    def _get_cache_service(self) -> ComposioCacheService | None:
+        return getattr(self, "_cache_service", None)
 
     # Toolkits that must run inside a sandbox (e.g., file/storage access)
     SANDBOX_REQUIRED_TOOLKITS = {
@@ -334,14 +343,13 @@ class ToolkitService:
         logger.debug(f"Fetching toolkits with limit: {limit}, category: {category}")
 
         # Try to get from cache first (only if no filters applied)
-        cached_result = (
-            await self._cache_service.get_all_toolkits() if self._cache_service else None
-        )
+        cache_service = self._get_cache_service()
+        cached_result = await cache_service.get_all_toolkits() if cache_service else None
         if cached_result:
             logger.debug("Using cached toolkits list")
             return cached_result
 
-        apps_list = self.client.toolkits.get()
+        apps_list = self._get_client().toolkits.get()
         items = apps_list if isinstance(apps_list, list) else []
 
         # Convert apps to ToolkitInfo, filtering out no_auth apps
@@ -389,8 +397,8 @@ class ToolkitService:
         cache_result = result.copy()
         cache_result["toolkits"] = [t.model_dump() for t in toolkits]
         cache_result["categories"] = [c.model_dump() for c in all_categories]
-        if self._cache_service:
-            await self._cache_service.set_all_toolkits(cache_result)
+        if cache_service:
+            await cache_service.set_all_toolkits(cache_result)
 
         return result
 
@@ -472,24 +480,21 @@ class ToolkitService:
             Logo URL or None
         """
         # Try cache first
-        cached_icon = (
-            await self._cache_service.get_toolkit_icon(toolkit_slug)
-            if self._cache_service
-            else None
-        )
+        cache_service = self._get_cache_service()
+        cached_icon = await cache_service.get_toolkit_icon(toolkit_slug) if cache_service else None
         if cached_icon is not None:
             logger.debug(f"Using cached icon for {toolkit_slug}")
             return cached_icon
 
         try:
-            response = self.client.toolkits.get(toolkit_slug)
+            response = self._get_client().toolkits.get(toolkit_slug)
             data = _to_dict(response)
             meta = _to_dict(data.get("meta", {}))
             icon_url = _get_attr(meta, "logo")
 
             # Cache the icon URL
-            if self._cache_service:
-                await self._cache_service.set_toolkit_icon(toolkit_slug, icon_url)
+            if cache_service:
+                await cache_service.set_toolkit_icon(toolkit_slug, icon_url)
 
             return icon_url
         except Exception as e:
@@ -570,16 +575,15 @@ class ToolkitService:
         logger.debug(f"Fetching detailed toolkit info for: {toolkit_slug}")
 
         # Try cache first
+        cache_service = self._get_cache_service()
         cached_details = (
-            await self._cache_service.get_toolkit_details(toolkit_slug)
-            if self._cache_service
-            else None
+            await cache_service.get_toolkit_details(toolkit_slug) if cache_service else None
         )
         if cached_details:
             logger.debug(f"Using cached details for {toolkit_slug}")
             return DetailedToolkitInfo(**cached_details)
 
-        response = self.client.tools.get_raw_composio_tools(toolkits=[toolkit_slug], limit=1)
+        response = self._get_client().tools.get_raw_composio_tools(toolkits=[toolkit_slug], limit=1)
         data = _to_dict(response[0]) if response else None
         meta = _to_dict(data.get("meta", {}))
 
@@ -617,10 +621,8 @@ class ToolkitService:
         )
 
         # Cache the result
-        if self._cache_service:
-            await self._cache_service.set_toolkit_details(
-                toolkit_slug, detailed_toolkit.model_dump()
-            )
+        if cache_service:
+            await cache_service.set_toolkit_details(toolkit_slug, detailed_toolkit.model_dump())
 
         logger.debug(f"Successfully fetched detailed info for {toolkit_slug}")
         return detailed_toolkit

@@ -92,6 +92,16 @@ class MCPSettings(BaseSettings):
         description="Anthropic console OAuth redirect URI",
     )
 
+    openai_oauth_issuer: str = Field(
+        default="https://auth.openai.com",
+        description="OpenAI auth issuer used for Codex ChatGPT OAuth flows",
+    )
+
+    openai_oauth_client_id: str = Field(
+        default="app_EMoamEEZ73f0CkXaXp7hrann",
+        description="OpenAI Codex client ID used for ChatGPT-backed Codex auth flows",
+    )
+
     def has_oauth_credentials(self) -> bool:
         """Check if MCP OAuth credentials are configured."""
         return bool(self.oauth_client_id and self.oauth_client_secret)

@@ -1,5 +1,7 @@
 import axiosInstance from '@/lib/axios'
 import {
+    CodexOpenAIDevicePollResponse,
+    CodexOpenAIDeviceStartResponse,
     GetAvailableModelsResponse,
     GetMcpSettingsResponse,
     GetSkillsResponse,
@@ -100,6 +102,28 @@ class SettingsService {
     }): Promise<IMcpSettings> {
         const response = await axiosInstance.post<IMcpSettings>(
             '/v1/user-settings/mcp/codex',
+            payload
+        )
+        return response.data
+    }
+
+    async startCodexOpenAIDeviceOAuth(payload: {
+        model?: string
+        model_reasoning_effort?: string
+        search?: boolean
+    }): Promise<CodexOpenAIDeviceStartResponse> {
+        const response = await axiosInstance.post<CodexOpenAIDeviceStartResponse>(
+            '/v1/user-settings/mcp/codex/openai/device/start',
+            payload
+        )
+        return response.data
+    }
+
+    async pollCodexOpenAIDeviceOAuth(payload: {
+        login_id: string
+    }): Promise<CodexOpenAIDevicePollResponse> {
+        const response = await axiosInstance.post<CodexOpenAIDevicePollResponse>(
+            '/v1/user-settings/mcp/codex/openai/device/poll',
             payload
         )
         return response.data

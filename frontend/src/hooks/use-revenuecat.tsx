@@ -7,6 +7,7 @@ import {
     useAppDispatch,
     useGetRevenueCatStatusQuery
 } from '@/state'
+import { ACCESS_TOKEN } from '@/constants/auth'
 
 interface UseRevenueCatOptions {
     onConnectionSuccess?: () => void
@@ -14,7 +15,10 @@ interface UseRevenueCatOptions {
 
 export const useRevenueCat = (options?: UseRevenueCatOptions) => {
     const dispatch = useAppDispatch()
-    const { data: statusData } = useGetRevenueCatStatusQuery()
+    const hasAccessToken = Boolean(localStorage.getItem(ACCESS_TOKEN))
+    const { data: statusData } = useGetRevenueCatStatusQuery(undefined, {
+        skip: !hasAccessToken
+    })
     const isConnected = statusData?.is_connected ?? false
     const [isAuthLoading, setIsAuthLoading] = useState(false)
 

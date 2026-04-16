@@ -3,6 +3,7 @@ import { connectorService, type GitHubRepository } from '@/services/connector.se
 import { toast } from 'sonner'
 import { AxiosError } from 'axios'
 import { useGetGitHubStatusQuery, connectorApi, useAppDispatch } from '@/state'
+import { ACCESS_TOKEN } from '@/constants/auth'
 
 interface ErrorResponse {
     detail?: string
@@ -38,7 +39,10 @@ interface UseGitHubOptions {
 
 export const useGitHub = (options?: UseGitHubOptions) => {
     const dispatch = useAppDispatch()
-    const { data: statusData } = useGetGitHubStatusQuery()
+    const hasAccessToken = Boolean(localStorage.getItem(ACCESS_TOKEN))
+    const { data: statusData } = useGetGitHubStatusQuery(undefined, {
+        skip: !hasAccessToken
+    })
     const isConnected = statusData?.is_connected ?? false
 
     const [isAuthLoading, setIsAuthLoading] = useState(false)

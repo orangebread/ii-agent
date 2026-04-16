@@ -1,4 +1,3 @@
-import { relaunch } from '@tauri-apps/plugin-process'
 import { Button } from '@/components/ui/button'
 import {
     ErrorView,
@@ -10,15 +9,15 @@ import {
 export default function AppErrorPage() {
     return (
         <ErrorView>
-            <ErrorHeader>We&apos;re fixing it</ErrorHeader>
+            <ErrorHeader>Something went wrong</ErrorHeader>
             <ErrorDescription>
-                The app encountered an error and needs to be restarted.
+                The app hit an unexpected error.
                 <br />
-                We know about it and we&apos;re working to fix it.
+                Reload the page and try again.
             </ErrorDescription>
             <ErrorActions>
-                <Button size="lg" onClick={relaunch}>
-                    Relaunch app
+                <Button size="lg" onClick={() => window.location.reload()}>
+                    Reload page
                 </Button>
             </ErrorActions>
         </ErrorView>

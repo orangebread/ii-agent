@@ -1,4 +1,3 @@
-import { useGoogleLogin } from '@react-oauth/google'
 import { Link, useNavigate } from 'react-router'
 import { useForm } from 'react-hook-form'
 import { z } from 'zod'
@@ -10,6 +9,8 @@ import { Button } from '@/components/ui/button'
 import { Icon } from '@/components/ui/icon'
 import { Form, FormControl, FormField, FormItem } from '@/components/ui/form'
 import { Input } from '@/components/ui/input'
+import { GoogleAuthButton } from '@/components/auth/google-auth-button'
+import { isGoogleOAuthConfigured } from '@/lib/google-oauth'
 
 const FormSchema = z.object({
     name: z.string({ error: 'Name is required' }).min(1, {
@@ -35,20 +36,7 @@ export function SignupPage() {
         }
     })
 
-    const googleLogin = useGoogleLogin({
-        flow: 'auth-code',
-        onSuccess: async (codeResponse) => {
-            try {
-                await loginWithAuthCode(codeResponse.code)
-                navigate('/')
-            } catch (error) {
-                console.error('Failed to login with auth code:', error)
-            }
-        },
-        onError: (errorResponse) => {
-            console.log('Login Failed:', errorResponse)
-        }
-    })
+    const googleOAuthEnabled = isGoogleOAuthConfigured()
 
     const onSubmit = async (data: z.infer<typeof FormSchema>) => {
         console.log(data)
@@ -177,14 +165,21 @@ export function SignupPage() {
                         {t('auth.privacyNoticeLink')}
                     </a>
                 </p>
-                <Button
-                    size="xl"
-                    onClick={() => googleLogin()}
-                    className="w-full bg-white text-black font-semibold shadow-btn"
-                >
-                    <Icon name="google" className="size-[22px]" />
-                    {t('auth.continueWithGoogle')}
-                </Button>
+                {googleOAuthEnabled ? (
+                    <GoogleAuthButton
+                        className="w-full bg-white text-black font-semibold shadow-btn"
+                        label={t('auth.continueWithGoogle')}
+                        onAuthCode={async (authCode) => {
+                            await loginWithAuthCode(authCode)
+                            navigate('/')
+                        }}
+                    />
+                ) : (
+                    <p className="text-center text-sm text-firefly/70 dark:text-sky-blue/70">
+                        Google sign-in is unavailable in this local environment
+                        because `VITE_GOOGLE_CLIENT_ID` is not configured.
+                    </p>
+                )}
             </div>
         </div>
     )

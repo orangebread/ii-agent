@@ -26,7 +26,11 @@ import ii_agent.settings.llm.models  # noqa: F401
 
 from ii_agent.settings.mcp.exceptions import MCPOAuthError, MCPSettingNotFoundError
 from ii_agent.settings.mcp.schemas import MCPServersConfig, MCPSettingCreate, MCPSettingUpdate
-from ii_agent.settings.mcp.service import MCPSettingService, _to_mcp_setting_info
+from ii_agent.settings.mcp.service import (
+    MCPSettingService,
+    _extract_codex_auth_json,
+    _to_mcp_setting_info,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -280,7 +284,7 @@ async def test_get_mcp_settings_success():
 
     result = await svc.get_mcp_settings(db=None, setting_id=setting.id, user_id="u1")
 
-    assert result.id == setting.id
+    assert str(result.id) == setting.id
 
 
 @pytest.mark.asyncio
@@ -324,7 +328,7 @@ async def test_list_mcp_settings_only_active():
     result = await svc.list_mcp_settings(db=None, user_id="u1", only_active=True)
 
     assert len(result.settings) == 1
-    assert result.settings[0].id == s1.id
+    assert str(result.settings[0].id) == s1.id
 
 
 @pytest.mark.asyncio
@@ -341,7 +345,7 @@ async def test_list_mcp_settings_no_metadata_filter():
     result = await svc.list_mcp_settings(db=None, user_id="u1", no_metadata=True)
 
     assert len(result.settings) == 1
-    assert result.settings[0].id == s_without_meta.id
+    assert str(result.settings[0].id) == s_without_meta.id
 
 
 # ---------------------------------------------------------------------------
@@ -459,7 +463,8 @@ async def test_configure_codex_with_apikey_only():
 
     assert result is not None
     created = list(repo.items.values())[0]
-    assert created.mcp_metadata["auth_json"]["OPENAI_API_KEY"] == "sk-test-key"
+    assert _extract_codex_auth_json(created.mcp_metadata)["OPENAI_API_KEY"] == "sk-test-key"
+    assert created.mcp_metadata["auth_mode"] == "api_key"
 
 
 @pytest.mark.asyncio
@@ -480,8 +485,9 @@ async def test_configure_codex_with_auth_json_and_apikey():
 
     assert result is not None
     created = list(repo.items.values())[0]
-    assert created.mcp_metadata["auth_json"]["OPENAI_API_KEY"] == "sk-merged"
-    assert created.mcp_metadata["auth_json"]["OTHER_KEY"] == "other-value"
+    auth_json = _extract_codex_auth_json(created.mcp_metadata)
+    assert auth_json["OPENAI_API_KEY"] == "sk-merged"
+    assert auth_json["OTHER_KEY"] == "other-value"
 
 
 @pytest.mark.asyncio
@@ -557,6 +563,37 @@ async def test_configure_codex_updates_existing():
 
     # Should update, not create new
     assert len(repo.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_configure_codex_preserves_existing_auth_when_only_updating_options():
+    """Saving Codex options without re-pasting auth reuses the stored credentials."""
+    existing = _make_mcp_setting(
+        user_id="u1",
+        mcp_metadata={
+            "tool_type": "codex",
+            "auth_json": {"OPENAI_API_KEY": "persist-me"},
+            "store_path": "~/.codex",
+        },
+    )
+    repo = FakeMCPRepo()
+    repo.items[existing.id] = existing
+    repo.by_tool_type["codex"] = existing
+    svc = _make_service(repo=repo)
+
+    await svc.configure_codex(
+        db=None,
+        user_id="u1",
+        auth_json=None,
+        apikey=None,
+        model="gpt-5",
+        reasoning_effort="medium",
+        search=True,
+    )
+
+    auth_json = _extract_codex_auth_json(existing.mcp_metadata)
+    assert auth_json["OPENAI_API_KEY"] == "persist-me"
+    assert existing.mcp_metadata["search"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -658,9 +695,28 @@ def test_to_mcp_setting_info_with_codex_metadata():
 
     result = _to_mcp_setting_info(setting)
 
-    assert result.id == setting.id
+    assert str(result.id) == setting.id
     assert result.metadata is not None
     assert result.metadata.tool_type == "codex"
+    assert result.metadata.has_auth is True
+    assert result.metadata.auth_json is None
+
+
+def test_to_mcp_setting_info_with_codex_metadata_include_secrets():
+    """Trusted internal consumers can request decrypted Codex auth payloads."""
+    setting = _make_mcp_setting(
+        user_id="u1",
+        mcp_metadata={
+            "tool_type": "codex",
+            "auth_json": {"OPENAI_API_KEY": "key"},
+            "store_path": "",
+        },
+    )
+
+    result = _to_mcp_setting_info(setting, include_secrets=True)
+
+    assert result.metadata is not None
+    assert result.metadata.auth_json == {"OPENAI_API_KEY": "key"}
 
 
 def test_to_mcp_setting_info_without_metadata():
@@ -669,7 +725,7 @@ def test_to_mcp_setting_info_without_metadata():
 
     result = _to_mcp_setting_info(setting)
 
-    assert result.id == setting.id
+    assert str(result.id) == setting.id
     assert result.metadata is None
 
 
@@ -682,7 +738,7 @@ def test_to_mcp_setting_info_invalid_metadata_handled():
 
     result = _to_mcp_setting_info(setting)
 
-    assert result.id == setting.id
+    assert str(result.id) == setting.id
     # Unknown tool_type - metadata should still be a base MCPMetadata
     # or None depending on validate_metadata behavior
 

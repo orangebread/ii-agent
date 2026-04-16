@@ -1,12 +1,14 @@
 import { createBrowserRouter, RouterProvider } from 'react-router'
 import { ProtectedRoute } from '@/components/protected-route'
 import { RootLayout } from '@/components/layouts/root-layout'
+import RouteErrorPage from '@/features/errors/route-error-page'
 
 const createAppRouter = () =>
     createBrowserRouter([
         {
             path: '/',
             element: <RootLayout />,
+            errorElement: <RouteErrorPage />,
             children: [
                 {
                     index: true,

@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import secrets
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse, urlencode
 
@@ -17,10 +18,29 @@ from ii_agent.auth.dependencies import DBSession, CurrentUser, SettingsDep
 from ii_agent.auth.exceptions import AuthException, InvalidTokenException
 from ii_agent.auth.jwt_handler import jwt_handler
 from ii_agent.auth.oidc_verify import verify_id_token_pyjwt, verify_at_hash_if_present
-from ii_agent.auth.schemas import TokenResponse
+from ii_agent.auth.schemas import (
+    AuthProvidersResponse,
+    OpenAIDevicePollRequest,
+    OpenAIDevicePollResponse,
+    OpenAIDeviceStartRequest,
+    OpenAIDeviceStartResponse,
+    TokenResponse,
+)
 from ii_agent.core.config.settings import get_settings
 from ii_agent.core.exceptions import BadGatewayError, InternalError, ValidationError
+from ii_agent.core.redis.cache import create_entity_cache
+from ii_agent.core.secrets.encryption import encryption_manager
+from ii_agent.settings.mcp.dependencies import MCPSettingServiceDep
+from ii_agent.settings.mcp.exceptions import MCPOAuthError
+from ii_agent.settings.mcp.service import (
+    OPENAI_DEVICE_CODE_TTL_SECONDS,
+    _build_openai_codex_auth_json,
+    _exchange_openai_device_code,
+    _poll_openai_device_code,
+    _request_openai_device_code,
+)
 from ii_agent.users.dependencies import UserServiceDep
+from ii_agent.users.exceptions import WaitlistDeniedException
 from ii_agent.users.schemas import UserPublic
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -29,6 +49,10 @@ II_STATE_SESSION_KEY = "ii_oauth_state"
 II_CODE_VERIFIER_SESSION_KEY = "ii_code_verifier"
 II_RETURN_TO_SESSION_KEY = "ii_return_to"
 II_RETURN_URL_SESSION_KEY = "ii_return_url"
+OPENAI_DEVICE_LOGIN_SALT = "auth-openai-device"
+OPENAI_PENDING_CONNECT_STATE_SESSION_KEY = "openai_pending_connect_id"
+OPENAI_PENDING_CONNECT_CACHE_NAMESPACE = "auth_openai_pending"
+_openai_pending_connect_cache = None
 
 # ---------------------------------------------------------------------------
 # Auth callback HTML template (inlined from templates.py — single consumer)
@@ -144,6 +168,28 @@ def _sanitize_return_to(value: Optional[str]) -> tuple[Optional[str], Optional[s
     return origin, value
 
 
+def _extract_identity_from_pending_openai(
+    pending_openai: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    if not pending_openai:
+        return None
+
+    auth_json = pending_openai.get("auth_json")
+    if not isinstance(auth_json, dict):
+        return None
+
+    tokens = auth_json.get("tokens")
+    if not isinstance(tokens, dict):
+        return None
+
+    id_token = tokens.get("id_token")
+    if not isinstance(id_token, str) or "." not in id_token:
+        return None
+
+    identity = _extract_openai_identity(id_token)
+    return identity if identity.get("email") else None
+
+
 def _make_token_payload(user_id: str, email: str, role: str) -> dict:
     """Build the JWT token payload dict for a user."""
     access_token = jwt_handler.create_access_token(
@@ -158,6 +204,235 @@ def _make_token_payload(user_id: str, email: str, role: str) -> dict:
         "token_type": "bearer",
         "expires_in": jwt_handler.access_token_expire_minutes * 60,
     }
+
+
+async def _complete_dev_auth_bypass_login(
+    *,
+    db: DBSession,
+    settings: SettingsDep,
+    user_service: UserServiceDep,
+    mcp_service: MCPSettingServiceDep,
+    openai_pending: Optional[str],
+    return_origin: Optional[str],
+    return_url: Optional[str],
+) -> HTMLResponse:
+    pending_openai_id, pending_openai = await _get_pending_openai_connection(openai_pending)
+    identity = _extract_identity_from_pending_openai(pending_openai)
+
+    email = (
+        str(identity.get("email") if identity else settings.dev_auth_bypass_email).strip().lower()
+    )
+    if not email:
+        raise InternalError("DEV auth bypass email is not configured")
+
+    first_name = str(
+        identity.get("first_name") if identity else settings.dev_auth_bypass_first_name
+    ).strip()
+    last_name = str(
+        identity.get("last_name") if identity else settings.dev_auth_bypass_last_name
+    ).strip()
+    avatar = identity.get("avatar") if identity else None
+    email_verified = bool(identity.get("email_verified", True)) if identity else True
+
+    user_stored = await user_service.find_or_create_oauth_user(
+        db,
+        email=email,
+        first_name=first_name,
+        last_name=last_name,
+        avatar=avatar,
+        email_verified=email_verified,
+        login_provider="dev_bypass",
+    )
+
+    if pending_openai:
+        await mcp_service.configure_codex(
+            db,
+            user_id=user_stored.id,
+            auth_json=pending_openai["auth_json"],
+            apikey=None,
+            model=pending_openai.get("model"),
+            reasoning_effort=pending_openai.get("reasoning_effort"),
+            search=bool(pending_openai.get("search", False)),
+        )
+    if pending_openai_id:
+        await _clear_pending_openai_connection(pending_openai_id)
+
+    token_payload = _make_token_payload(
+        str(user_stored.id),
+        str(user_stored.email),
+        str(user_stored.role),
+    )
+    html_content = _render_auth_callback_html(token_payload, return_origin, return_url)
+    return HTMLResponse(content=html_content)
+
+
+def _get_openai_device_serializer() -> URLSafeSerializer:
+    return URLSafeSerializer(get_settings().oauth.session_secret_key, salt=OPENAI_DEVICE_LOGIN_SALT)
+
+
+def _create_openai_device_login_id(
+    *,
+    device_code: dict[str, Any],
+    model: Optional[str],
+    reasoning_effort: Optional[str],
+    search: bool,
+) -> str:
+    issued_at = int(datetime.now(timezone.utc).timestamp())
+    return _get_openai_device_serializer().dumps(
+        {
+            "device_auth_id": device_code["device_auth_id"],
+            "user_code": device_code["user_code"],
+            "interval_seconds": device_code["interval_seconds"],
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "search": search,
+            "issued_at": issued_at,
+            "expires_at": issued_at + OPENAI_DEVICE_CODE_TTL_SECONDS,
+        }
+    )
+
+
+def _verify_openai_device_login_id(login_id: str) -> dict[str, Any]:
+    try:
+        state = _get_openai_device_serializer().loads(login_id)
+    except BadSignature as exc:
+        raise ValidationError("Invalid OpenAI device login state") from exc
+
+    if int(state.get("expires_at", 0)) < int(datetime.now(timezone.utc).timestamp()):
+        raise ValidationError("OpenAI device login expired. Start again.")
+    return state
+
+
+def _decode_jwt_payload(token: str) -> dict[str, Any]:
+    if not token or "." not in token:
+        return {}
+
+    try:
+        payload = token.split(".")[1]
+        padding = "=" * (-len(payload) % 4)
+        decoded = base64.urlsafe_b64decode(f"{payload}{padding}".encode()).decode()
+        data = json.loads(decoded)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _extract_openai_identity(id_token: str) -> dict[str, Any]:
+    claims = _decode_jwt_payload(id_token)
+    name = str(claims.get("name") or "").strip()
+    first_name = str(claims.get("given_name") or "").strip()
+    last_name = str(claims.get("family_name") or "").strip()
+
+    if not first_name and name:
+        parts = name.split()
+        first_name = parts[0]
+        last_name = " ".join(parts[1:]) if len(parts) > 1 else ""
+
+    auth_claims = claims.get("https://api.openai.com/auth") or {}
+    if not isinstance(auth_claims, dict):
+        auth_claims = {}
+
+    account_id = auth_claims.get("chatgpt_account_id") or claims.get("sub")
+    email = str(claims.get("email") or "").strip().lower()
+    if not email and account_id:
+        email = f"openai-{account_id}@users.openai.local"
+
+    return {
+        "email": email,
+        "email_verified": bool(claims.get("email_verified", False)),
+        "first_name": first_name,
+        "last_name": last_name,
+        "avatar": claims.get("picture"),
+        "account_id": account_id,
+    }
+
+
+def _is_synthetic_openai_email(email: str) -> bool:
+    return email.endswith("@users.openai.local")
+
+
+def _extract_ii_name_parts(claims: dict[str, Any]) -> tuple[str, str]:
+    """Support either structured or flat ``name`` claims from the II IdP."""
+    name_claim = claims.get("name")
+    if isinstance(name_claim, dict):
+        first_name = str(name_claim.get("first") or "").strip()
+        last_name = str(name_claim.get("last") or "").strip()
+        return first_name, last_name
+
+    if isinstance(name_claim, str):
+        parts = name_claim.strip().split()
+        if not parts:
+            return "", ""
+        return parts[0], " ".join(parts[1:])
+
+    return "", ""
+
+
+def _get_openai_pending_connect_cache():
+    global _openai_pending_connect_cache
+    if _openai_pending_connect_cache is None:
+        _openai_pending_connect_cache = create_entity_cache(
+            namespace=OPENAI_PENDING_CONNECT_CACHE_NAMESPACE,
+            ttl=OPENAI_DEVICE_CODE_TTL_SECONDS,
+        )
+    return _openai_pending_connect_cache
+
+
+async def _stage_pending_openai_connection(
+    *,
+    auth_json: dict[str, Any],
+    model: Optional[str],
+    reasoning_effort: Optional[str],
+    search: bool,
+) -> str:
+    pending_id = secrets.token_urlsafe(24)
+    encrypted_auth_json = encryption_manager.encrypt(json.dumps(auth_json))
+    cache = _get_openai_pending_connect_cache()
+
+    await cache.set(
+        pending_id,
+        {
+            "auth_json": encrypted_auth_json,
+            "model": model,
+            "reasoning_effort": reasoning_effort,
+            "search": search,
+        },
+        ttl=OPENAI_DEVICE_CODE_TTL_SECONDS,
+    )
+    return pending_id
+
+
+async def _get_pending_openai_connection(
+    pending_id: Optional[str],
+) -> tuple[Optional[str], Optional[dict[str, Any]]]:
+    if not pending_id:
+        return pending_id, None
+    cache = _get_openai_pending_connect_cache()
+    payload = await cache.get(pending_id)
+    if not isinstance(payload, dict):
+        return pending_id, None
+
+    decrypted_auth_json = encryption_manager.decrypt(str(payload.get("auth_json") or ""))
+    if not decrypted_auth_json:
+        return pending_id, None
+
+    try:
+        auth_json = json.loads(decrypted_auth_json)
+    except json.JSONDecodeError:
+        return pending_id, None
+
+    return pending_id, {
+        "auth_json": auth_json,
+        "model": payload.get("model"),
+        "reasoning_effort": payload.get("reasoning_effort"),
+        "search": bool(payload.get("search", False)),
+    }
+
+
+async def _clear_pending_openai_connection(pending_id: Optional[str]) -> None:
+    if pending_id:
+        cache = _get_openai_pending_connect_cache()
+        await cache.evict(pending_id)
 
 
 async def _exchange_code_for_token(code: str, code_verifier: Optional[str]) -> Dict[str, Any]:
@@ -214,16 +489,34 @@ async def _fetch_userinfo_if_enabled(
 
 
 @router.get("/oauth/ii/login")
-async def ii_login(request: Request, settings: SettingsDep, return_to: Optional[str] = None):
+async def ii_login(
+    request: Request,
+    db: DBSession,
+    settings: SettingsDep,
+    user_service: UserServiceDep,
+    mcp_service: MCPSettingServiceDep,
+    return_to: Optional[str] = None,
+    openai_pending: Optional[str] = None,
+):
     """Initiate II OAuth login by redirecting to the authorization server."""
-
-    if not settings.oauth.ii_client_id:
-        raise InternalError("II OAuth client_id not configured")
 
     origin, safe_url = _sanitize_return_to(return_to)
     if safe_url is None:
         referer = request.headers.get("referer")
         origin, safe_url = _sanitize_return_to(referer)
+
+    if not settings.oauth.ii_client_id:
+        if not settings.is_dev_auth_bypass_enabled:
+            raise InternalError("II OAuth client_id not configured")
+        return await _complete_dev_auth_bypass_login(
+            db=db,
+            settings=settings,
+            user_service=user_service,
+            mcp_service=mcp_service,
+            openai_pending=openai_pending,
+            return_origin=origin,
+            return_url=safe_url,
+        )
 
     state = _make_state()
     code_verifier, code_challenge = _make_pkce_pair()
@@ -234,6 +527,8 @@ async def ii_login(request: Request, settings: SettingsDep, return_to: Optional[
         request.session[II_RETURN_TO_SESSION_KEY] = origin
     if safe_url:
         request.session[II_RETURN_URL_SESSION_KEY] = safe_url
+    if openai_pending:
+        request.session[OPENAI_PENDING_CONNECT_STATE_SESSION_KEY] = openai_pending
 
     params = {
         "client_id": settings.oauth.ii_client_id,
@@ -249,12 +544,24 @@ async def ii_login(request: Request, settings: SettingsDep, return_to: Optional[
     return RedirectResponse(url=f"{settings.ii_auth_url}?{query}", status_code=302)
 
 
+@router.get("/providers", response_model=AuthProvidersResponse)
+async def auth_providers(settings: SettingsDep) -> AuthProvidersResponse:
+    """Return public auth provider availability for the current environment."""
+    ii_oauth_available = settings.oauth.has_ii_oauth() or settings.is_dev_auth_bypass_enabled
+    return AuthProvidersResponse(
+        ii_oauth_available=ii_oauth_available,
+        google_oauth_available=settings.oauth.has_google_oauth(),
+        dev_auth_bypass_enabled=settings.is_dev_auth_bypass_enabled,
+    )
+
+
 @router.get("/oauth/ii/callback")
 async def ii_callback(
     request: Request,
     db: DBSession,
     settings: SettingsDep,
     user_service: UserServiceDep,
+    mcp_service: MCPSettingServiceDep,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -300,8 +607,7 @@ async def ii_callback(
         raise BadGatewayError("Email claim missing from ID token")
 
     email_verified = bool(claims.get("email_verified", False))
-    first_name = claims.get("name").get("first") or ""
-    last_name = claims.get("name").get("last") or ""
+    first_name, last_name = _extract_ii_name_parts(claims)
     picture = claims.get("picture") or None
 
     userinfo = None
@@ -325,6 +631,22 @@ async def ii_callback(
         email_verified=email_verified,
         login_provider="ii",
     )
+
+    pending_openai_state = request.session.pop(OPENAI_PENDING_CONNECT_STATE_SESSION_KEY, None)
+    pending_openai_id, pending_openai = await _get_pending_openai_connection(pending_openai_state)
+    if pending_openai:
+        await mcp_service.configure_codex(
+            db,
+            user_id=user_stored.id,
+            auth_json=pending_openai["auth_json"],
+            apikey=None,
+            model=pending_openai.get("model"),
+            reasoning_effort=pending_openai.get("reasoning_effort"),
+            search=bool(pending_openai.get("search", False)),
+        )
+        await _clear_pending_openai_connection(pending_openai_id)
+    elif pending_openai_id:
+        await _clear_pending_openai_connection(pending_openai_id)
 
     token_payload = _make_token_payload(
         str(user_stored.id),
@@ -449,6 +771,74 @@ async def google_callback(
         refresh_token=token_payload["refresh_token"],
         expires_in=token_payload["expires_in"],
     )
+
+
+@router.post("/oauth/openai/device/start", response_model=OpenAIDeviceStartResponse)
+async def start_openai_device_login(
+    request: OpenAIDeviceStartRequest,
+    settings: SettingsDep,
+):
+    """Start OpenAI device login and return the verification instructions."""
+    device_code = await _request_openai_device_code(settings.mcp)
+    login_id = _create_openai_device_login_id(
+        device_code=device_code,
+        model=request.model,
+        reasoning_effort=request.model_reasoning_effort,
+        search=request.search,
+    )
+    return OpenAIDeviceStartResponse(
+        login_id=login_id,
+        verification_url=device_code["verification_url"],
+        user_code=device_code["user_code"],
+        interval_seconds=device_code["interval_seconds"],
+        expires_in_seconds=OPENAI_DEVICE_CODE_TTL_SECONDS,
+    )
+
+
+@router.post("/oauth/openai/device/poll", response_model=OpenAIDevicePollResponse)
+async def poll_openai_device_login(
+    payload: OpenAIDevicePollRequest,
+    settings: SettingsDep,
+):
+    """Poll OpenAI device login and stage the Codex auth for the next II login."""
+    try:
+        login_state = _verify_openai_device_login_id(payload.login_id)
+        code_payload = await _poll_openai_device_code(
+            settings.mcp,
+            device_auth_id=login_state["device_auth_id"],
+            user_code=login_state["user_code"],
+        )
+        if code_payload is None:
+            return OpenAIDevicePollResponse(status="pending", continue_with_ii=False)
+
+        tokens = await _exchange_openai_device_code(
+            settings.mcp,
+            authorization_code=code_payload["authorization_code"],
+            code_verifier=code_payload["code_verifier"],
+        )
+        auth_json = _build_openai_codex_auth_json(tokens)
+        pending_connect_id = await _stage_pending_openai_connection(
+            auth_json=auth_json,
+            model=login_state.get("model"),
+            reasoning_effort=login_state.get("reasoning_effort"),
+            search=bool(login_state.get("search", False)),
+        )
+        return OpenAIDevicePollResponse(
+            status="completed",
+            continue_with_ii=True,
+            pending_connect_id=pending_connect_id,
+        )
+    except (
+        MCPOAuthError,
+        ValidationError,
+        WaitlistDeniedException,
+        BadGatewayError,
+    ) as exc:
+        return OpenAIDevicePollResponse(
+            status="error",
+            continue_with_ii=False,
+            error=str(exc),
+        )
 
 
 @router.get("/me", response_model=UserPublic)

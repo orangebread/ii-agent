@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib
+import json
 import sys
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -16,10 +18,7 @@ pytestmark = pytest.mark.unit
 
 def _get_auth_router_module():
     """Get the ii_agent.auth.router module object (not the router APIRouter instance)."""
-    # Ensure the module is loaded
-    import ii_agent.auth  # noqa - loads parent package
-
-    return sys.modules["ii_agent.auth.router"]
+    return importlib.import_module("ii_agent.auth.router")
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +174,127 @@ class TestMakeTokenPayloadR4:
             mock_handler.access_token_expire_minutes = 60
             payload = mod._make_token_payload("uid", "e@e.com", "user")
         assert payload["expires_in"] == 60 * 60
+
+
+class TestOpenAIIdentityExtractionR4:
+    def test_extract_openai_identity_uses_email_when_present(self):
+        mod = _get_auth_router_module()
+        payload = {
+            "email": "user@example.com",
+            "email_verified": True,
+            "given_name": "Ada",
+            "family_name": "Lovelace",
+            "picture": "https://example.com/avatar.png",
+            "sub": "sub_123",
+        }
+        token = ".".join(
+            [
+                "header",
+                base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode(),
+                "sig",
+            ]
+        )
+
+        identity = mod._extract_openai_identity(token)
+
+        assert identity["email"] == "user@example.com"
+        assert identity["first_name"] == "Ada"
+        assert identity["last_name"] == "Lovelace"
+        assert identity["email_verified"] is True
+
+    def test_extract_openai_identity_builds_fallback_email(self):
+        mod = _get_auth_router_module()
+        payload = {
+            "name": "Grace Hopper",
+            "sub": "acct_123",
+        }
+        token = ".".join(
+            [
+                "header",
+                base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode(),
+                "sig",
+            ]
+        )
+
+        identity = mod._extract_openai_identity(token)
+
+        assert identity["email"] == "openai-acct_123@users.openai.local"
+        assert identity["first_name"] == "Grace"
+        assert identity["last_name"] == "Hopper"
+
+
+class TestIINameExtractionR4:
+    def test_extract_ii_name_parts_supports_structured_name(self):
+        mod = _get_auth_router_module()
+
+        first_name, last_name = mod._extract_ii_name_parts(
+            {"name": {"first": "Ada", "last": "Lovelace"}}
+        )
+
+        assert first_name == "Ada"
+        assert last_name == "Lovelace"
+
+    def test_extract_ii_name_parts_supports_flat_name(self):
+        mod = _get_auth_router_module()
+
+        first_name, last_name = mod._extract_ii_name_parts({"name": "Grace Hopper"})
+
+        assert first_name == "Grace"
+        assert last_name == "Hopper"
+
+
+class TestOpenAIPendingBridgeR4:
+    @pytest.mark.asyncio
+    async def test_stage_get_and_clear_pending_openai_connection(self):
+        mod = _get_auth_router_module()
+
+        pending_id = await mod._stage_pending_openai_connection(
+            auth_json={"OPENAI_API_KEY": "secret"},
+            model="gpt-5",
+            reasoning_effort="medium",
+            search=False,
+        )
+
+        stored_id, payload = await mod._get_pending_openai_connection(pending_id)
+        assert stored_id == pending_id
+        assert payload is not None
+        assert payload["auth_json"] == {"OPENAI_API_KEY": "secret"}
+        assert payload["model"] == "gpt-5"
+        assert payload["reasoning_effort"] == "medium"
+        assert payload["search"] is False
+
+        await mod._clear_pending_openai_connection(pending_id)
+        _, cleared_payload = await mod._get_pending_openai_connection(pending_id)
+        assert cleared_payload is None
+
+    @pytest.mark.asyncio
+    async def test_ii_login_persists_openai_pending_id_in_session(self):
+        mod = _get_auth_router_module()
+        request = SimpleNamespace(session={}, headers={})
+        settings = SimpleNamespace(
+            oauth=SimpleNamespace(
+                ii_client_id="client-id",
+                ii_redirect_uri="http://localhost:8000/auth/oauth/ii/callback",
+                ii_scope="openid profile email",
+            ),
+            ii_auth_url="https://auth.example.com/oauth2/auth",
+        )
+
+        with patch.object(mod, "get_settings") as mock_settings:
+            mock_settings.return_value.oauth.session_secret_key = "test-secret"
+            response = await mod.ii_login(
+                request=request,
+                db=object(),
+                settings=settings,
+                user_service=MagicMock(),
+                mcp_service=MagicMock(),
+                return_to="http://localhost:1420/login",
+                openai_pending="pending-123",
+            )
+
+        assert request.session[mod.OPENAI_PENDING_CONNECT_STATE_SESSION_KEY] == "pending-123"
+        assert response.status_code == 302
+        assert "client_id=client-id" in response.headers["location"]
 
 
 class TestExchangeCodeForTokenR4:

@@ -716,7 +716,12 @@ class SandboxService:
         from ii_server.mcp.client import MCPClient
 
         mcp_svc = MCPSettingService(repo=MCPSettingRepository(), config=self._config)
-        mcp_settings = await mcp_svc.list_mcp_settings(db, user_id=user_id, only_active=True)
+        mcp_settings = await mcp_svc.list_mcp_settings(
+            db,
+            user_id=user_id,
+            only_active=True,
+            include_secrets=True,
+        )
 
         combined_config = (
             mcp_settings.get_combined_active_config() if mcp_settings.settings else None

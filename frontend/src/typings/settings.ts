@@ -77,8 +77,13 @@ interface MCPConfig {
 
 interface MCPMetadata {
     auth_json?: Record<string, any>
+    has_auth?: boolean
+    auth_mode?: string
+    oauth_provider?: string
+    oauth_connected_at?: string
+    chatgpt_plan_type?: string
+    chatgpt_account_id?: string
     model?: string
-    apikey?: string
     model_reasoning_effort?: string
     search?: boolean
 }
@@ -99,6 +104,20 @@ export interface UpdateMcpSettingsPayload {
 
 export interface GetMcpSettingsResponse {
     settings: IMcpSettings[]
+}
+
+export interface CodexOpenAIDeviceStartResponse {
+    login_id: string
+    verification_url: string
+    user_code: string
+    interval_seconds: number
+    expires_in_seconds: number
+}
+
+export interface CodexOpenAIDevicePollResponse {
+    status: 'pending' | 'completed' | 'error'
+    setting?: IMcpSettings
+    error?: string
 }
 
 // Skills types

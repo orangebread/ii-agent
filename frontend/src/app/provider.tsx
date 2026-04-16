@@ -6,14 +6,27 @@ import { ErrorBoundary } from 'react-error-boundary'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { TerminalProvider } from '@/contexts/terminal-context'
 import { AuthProvider } from '@/contexts/auth-context'
+import { getGoogleOAuthClientId } from '@/lib/google-oauth'
+
+function MaybeGoogleOAuthProvider({ children }: { children: ReactNode }) {
+    const googleClientId = getGoogleOAuthClientId()
+
+    if (!googleClientId) {
+        return <>{children}</>
+    }
+
+    return (
+        <GoogleOAuthProvider clientId={googleClientId}>
+            {children}
+        </GoogleOAuthProvider>
+    )
+}
 
 export default function AppProvider({ children }: { children: ReactNode }) {
-    const googleClientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || ''
-
     return (
         <Suspense fallback={<>Loading...</>}>
             <ErrorBoundary FallbackComponent={AppErrorPage}>
-                <GoogleOAuthProvider clientId={googleClientId}>
+                <MaybeGoogleOAuthProvider>
                     <AuthProvider>
                         <ThemeProvider
                             attribute="class"
@@ -25,7 +38,7 @@ export default function AppProvider({ children }: { children: ReactNode }) {
                             </TerminalProvider>
                         </ThemeProvider>
                     </AuthProvider>
-                </GoogleOAuthProvider>
+                </MaybeGoogleOAuthProvider>
             </ErrorBoundary>
         </Suspense>
     )

@@ -1,10 +1,11 @@
 """Pydantic schemas (DTOs) for mcp_settings domain."""
 
 import json
+from typing import Any, Dict, List, Literal, Optional, Union
+from uuid import UUID
+
 from fastmcp.mcp_config import RemoteMCPServer, StdioMCPServer
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, List, Any, Union
-from uuid import UUID
 
 from ii_agent.core.logger import logger
 
@@ -19,8 +20,41 @@ class CodexMetadata(MCPMetadata):
     """Metadata specific to Codex MCP tool."""
 
     tool_type: str = Field(default="codex", description="Tool type is always 'codex'")
-    auth_json: Dict[str, Any] = Field(..., description="Codex authentication JSON")
+    auth_json: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Codex authentication JSON. Only populated for trusted internal consumers.",
+    )
+    encrypted_auth_json: Optional[str] = Field(
+        default=None,
+        description="Encrypted Codex authentication JSON stored server-side",
+    )
+    has_auth: bool = Field(default=False, description="Whether Codex auth is configured")
+    auth_mode: Optional[str] = Field(
+        default=None,
+        description="Authentication mode (api_key, manual_auth_json, openai_oauth)",
+    )
+    oauth_provider: Optional[str] = Field(
+        default=None,
+        description="OAuth provider for Codex auth, when applicable",
+    )
+    oauth_connected_at: Optional[str] = Field(
+        default=None,
+        description="When the OpenAI OAuth connection was established",
+    )
+    chatgpt_plan_type: Optional[str] = Field(
+        default=None,
+        description="ChatGPT plan type derived from OpenAI auth claims",
+    )
+    chatgpt_account_id: Optional[str] = Field(
+        default=None,
+        description="ChatGPT workspace/account ID derived from OpenAI auth claims",
+    )
     store_path: str = Field(default="~/.codex", description="Path where Codex stores its data")
+    model: Optional[str] = Field(default=None, description="Optional model to start Codex with")
+    model_reasoning_effort: Optional[str] = Field(
+        default=None, description="Reasoning effort of model"
+    )
+    search: bool = Field(default=False, description="Whether Codex search is enabled")
 
 
 class ClaudeCodeMetadata(MCPMetadata):
@@ -120,6 +154,24 @@ class ClaudeCodeConfigConfigure(BaseModel):
     authorization_code: str = Field(..., description="OAuth authorization code from Claude")
 
 
+class CodexOpenAIDeviceStartRequest(BaseModel):
+    """Request model for starting the OpenAI Codex device-code flow."""
+
+    model: Optional[str] = Field(None, description="Optional model to start Codex with")
+    model_reasoning_effort: Optional[str] = Field(None, description="Reasoning effort of model")
+    search: bool = Field(False, description="Toggle search for Codex")
+
+
+class CodexOpenAIDeviceStartResponse(BaseModel):
+    """Response returned when starting the OpenAI Codex device-code flow."""
+
+    login_id: str
+    verification_url: str
+    user_code: str
+    interval_seconds: int
+    expires_in_seconds: int
+
+
 class MCPSettingCreate(BaseModel):
     """Model for creating/updating MCP settings."""
 
@@ -144,6 +196,20 @@ class MCPSettingInfo(BaseModel):
     is_active: bool
     created_at: str
     updated_at: Optional[str] = None
+
+
+class CodexOpenAIDevicePollRequest(BaseModel):
+    """Request model for polling an OpenAI Codex device-code login."""
+
+    login_id: str
+
+
+class CodexOpenAIDevicePollResponse(BaseModel):
+    """Status response for an OpenAI Codex device-code login."""
+
+    status: Literal["pending", "completed", "error"]
+    setting: Optional[MCPSettingInfo] = None
+    error: Optional[str] = None
 
 
 class MCPSettingList(BaseModel):

@@ -84,8 +84,8 @@ make setup
 #    Copy model_configs.example.yaml to model_configs.yaml, fill in your keys,
 #    then set MODEL_CONFIGS_FILE=model_configs.yaml in .env
 
-# 4. Start everything (infra + backend + frontend)
-make dev-all
+# 4. Start everything with preflight checks (infra + backend + frontend)
+./scripts/start.sh
 ```
 
 This starts:
@@ -95,6 +95,24 @@ This starts:
 - **Redis** at localhost:6379
 - **MinIO** (S3-compatible storage) at http://localhost:9001 (minioadmin/minioadmin)
 
+`./scripts/start.sh` is the preferred local entrypoint now. It:
+- validates your local environment before startup
+- creates `.env` and `frontend/.env` from examples if they are missing
+- starts backend and frontend together
+- prints the important local service URLs so you can see what is actually running
+
+If you only want to run the validation step:
+
+```bash
+./scripts/start.sh --check-only
+```
+
+If you only want the backend:
+
+```bash
+./scripts/start.sh --backend-only
+```
+
 ### Configuration Files
 
 | File | Created from | Purpose |
@@ -102,6 +120,45 @@ This starts:
 | `.env` | `.env.example` | Backend config: database, Redis, storage, auth, LLM keys |
 | `frontend/.env` | `frontend/.env.example` | Frontend config: API URL, Google OAuth, theme |
 | `model_configs.yaml` | `model_configs.example.yaml` | LLM model definitions (alternative to inline JSON in `.env`) |
+
+### Local Auth and OpenAI Onboarding
+
+The local auth story changed materially:
+
+- `ENVIRONMENT=local` no longer requires an internal II IdP client just to enter the app
+- if `II_CLIENT_ID` is unset in local, the backend enables a local development auth bypass automatically
+- the login page can start with **OpenAI device auth** to stage a Codex connection, then continue through the normal II-Agent session flow
+- in local development, that second step can complete through the dev bypass instead of a real II IdP
+- Google sign-in is optional and only appears when `VITE_GOOGLE_CLIENT_ID` is configured in `frontend/.env`
+
+Important implications:
+
+- **Production/staging** should still use real II OAuth
+- **Local** can enter the app without `II_CLIENT_ID`
+- staged OpenAI auth is used to attach Codex/OpenAI-backed capabilities to the local app session; it is not a generic “Sign in with OpenAI” replacement for the app’s identity model
+
+Relevant `.env` knobs:
+
+```bash
+# Required for the local bypass behavior to activate automatically
+ENVIRONMENT=local
+
+# Optional in local, required if you want real II OAuth instead of local bypass
+II_CLIENT_ID=
+II_REDIRECT_URI=http://localhost:8000/auth/oauth/ii/callback
+
+# Optional override if you want to force bypass behavior outside local
+DEV_AUTH_BYPASS_ENABLED=false
+DEV_AUTH_BYPASS_EMAIL=dev@ii-agent.local
+DEV_AUTH_BYPASS_FIRST_NAME=Local
+DEV_AUTH_BYPASS_LAST_NAME=Developer
+```
+
+OpenAI/Codex notes:
+
+- the first-run onboarding flow can connect OpenAI before the user enters the app
+- if the OpenAI device flow completes successfully, the staged Codex connection is attached during the II/local-bypass login step
+- if no Codex auth is attached yet, the authenticated home route will gate the user into OpenAI onboarding before exposing the main app shell
 
 ### LLM Providers
 
@@ -122,7 +179,7 @@ make help             # Show all available commands
 make dev-all          # Start everything (infra + backend + frontend)
 make infra            # Start only Postgres, Redis, MinIO
 make backend-dev      # Start backend only (port 8000)
-make frontend-dev     # Start frontend only (port 5173)
+make frontend-dev     # Start frontend only (port 1420 by default)
 make db-migrate       # Run database migrations
 make lint             # Lint backend + frontend
 make format           # Auto-format backend + frontend

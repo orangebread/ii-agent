@@ -233,6 +233,10 @@ class BaseRepository(Generic[T]):
         await db.refresh(entity)
         return entity
 
+    async def create(self, db: AsyncSession, entity: T) -> T:
+        """Backwards-compatible alias for repositories that expose create()."""
+        return await self.save(db, entity)
+
     async def update(self, db: AsyncSession, entity: T) -> T:
         """Flush pending changes on a tracked entity and refresh."""
         await db.flush()

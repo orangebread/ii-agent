@@ -103,6 +103,26 @@ class Settings(BaseSettings):
         description="Frontend URL for OAuth redirects and MCP consent page",
     )
 
+    dev_auth_bypass_enabled: bool = Field(
+        default=False,
+        description="Enable local-development auth bypass when II OAuth is unavailable",
+    )
+
+    dev_auth_bypass_email: str = Field(
+        default="dev@ii-agent.local",
+        description="Fallback email used for local-development auth bypass",
+    )
+
+    dev_auth_bypass_first_name: str = Field(
+        default="Local",
+        description="Fallback first name used for local-development auth bypass",
+    )
+
+    dev_auth_bypass_last_name: str = Field(
+        default="Developer",
+        description="Fallback last name used for local-development auth bypass",
+    )
+
     # ========== Nested Configuration Sections ==========
 
     database: DatabaseSettings = Field(
@@ -381,6 +401,13 @@ class Settings(BaseSettings):
     @property
     def ii_issuer(self) -> str:
         return self.oauth.ii_auth_base.rstrip("/")
+
+    @property
+    def is_dev_auth_bypass_enabled(self) -> bool:
+        """Return whether the local auth bypass is active for this environment."""
+        return self.dev_auth_bypass_enabled or (
+            self.environment == "local" and not self.oauth.ii_client_id
+        )
 
     # MCP OAuth computed URLs (use ii_auth_base for MCP external OAuth too)
     @property

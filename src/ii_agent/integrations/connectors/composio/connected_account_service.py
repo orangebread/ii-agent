@@ -47,7 +47,13 @@ class ConnectedAccountService:
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the connected account service."""
-        self.client = ComposioClient.get_client(api_key)
+        self._api_key = api_key
+        self.client = None
+
+    def _get_client(self):
+        if self.client is None:
+            self.client = ComposioClient.get_client(self._api_key)
+        return self.client
 
     def _extract_connection_state(self, response: Any) -> ConnectionState:
         """Extract ConnectionState from Composio response."""
@@ -106,7 +112,7 @@ class ConnectedAccountService:
         if initiation_fields:
             config["val"] = self._build_state_val(initiation_fields)
 
-        connection_request = self.client.connected_accounts.initiate(
+        connection_request = self._get_client().connected_accounts.initiate(
             user_id=user_id,
             auth_config_id=auth_config_id,
             callback_url=callback_url,
@@ -141,7 +147,7 @@ class ConnectedAccountService:
         """
         logger.debug(f"Fetching connected account: {connected_account_id}")
 
-        response = self.client.connected_accounts.get(connected_account_id)
+        response = self._get_client().connected_accounts.get(connected_account_id)
         if not response:
             return None
 
@@ -188,7 +194,7 @@ class ConnectedAccountService:
         logger.debug(f"Deleting connected account: {connected_account_id}")
 
         try:
-            self.client.connected_accounts.delete(connected_account_id)
+            self._get_client().connected_accounts.delete(connected_account_id)
             logger.info(f"Successfully deleted connected account: {connected_account_id}")
             return True
         except Exception as e:
@@ -207,7 +213,7 @@ class ConnectedAccountService:
         logger.debug(f"Enabling connected account: {connected_account_id}")
 
         try:
-            result = self.client.connected_accounts.enable(connected_account_id)
+            self._get_client().connected_accounts.enable(connected_account_id)
             logger.info(f"Successfully enabled connected account: {connected_account_id}")
             return {"success": True, "message": "Account enabled successfully"}
         except Exception as e:
@@ -226,7 +232,7 @@ class ConnectedAccountService:
         logger.debug(f"Disabling connected account: {connected_account_id}")
 
         try:
-            result = self.client.connected_accounts.disable(connected_account_id)
+            self._get_client().connected_accounts.disable(connected_account_id)
             logger.info(f"Successfully disabled connected account: {connected_account_id}")
             return {"success": True, "message": "Account disabled successfully"}
         except Exception as e:

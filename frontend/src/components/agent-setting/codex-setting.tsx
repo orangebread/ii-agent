@@ -1,12 +1,16 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+
+import { settingsService } from '@/services/settings.service'
+import { useAppSelector } from '@/state'
+import { ISetting } from '@/typings'
+import { IMcpSettings } from '@/typings/settings'
+import { toast } from 'sonner'
+import { hasCodexAuth } from '@/lib/codex'
 
 import { Button } from '../ui/button'
 import { Icon } from '../ui/icon'
-import { Sheet, SheetClose, SheetContent, SheetHeader } from '../ui/sheet'
-import { Textarea } from '../ui/textarea'
 import { Input } from '../ui/input'
 import { Label } from '../ui/label'
-import { Switch } from '../ui/switch'
 import {
     Select,
     SelectContent,
@@ -14,15 +18,21 @@ import {
     SelectTrigger,
     SelectValue
 } from '../ui/select'
-import { ISetting } from '@/typings'
-import { useAppSelector } from '@/state'
-import { settingsService } from '@/services/settings.service'
-import { toast } from 'sonner'
+import { Sheet, SheetClose, SheetContent, SheetHeader } from '../ui/sheet'
+import { Switch } from '../ui/switch'
+import { Textarea } from '../ui/textarea'
 
 interface CodexSettingProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     onSaveConfig: (data: ISetting) => void
+}
+
+interface DeviceAuthState {
+    loginId: string
+    verificationUrl: string
+    userCode: string
+    intervalSeconds: number
 }
 
 const CodexSetting = ({
@@ -38,32 +48,50 @@ const CodexSetting = ({
     )
 
     const [authJson, setAuthJson] = useState('')
-    const [model, setModel] = useState('gpt-5')
     const [apiKey, setApiKey] = useState('')
-    const [reasoningEffort, setReasoningEffort] = useState<string>('medium')
-    const [searchEnabled, setSearchEnabled] = useState<boolean>(false)
+    const [model, setModel] = useState('gpt-5')
+    const [reasoningEffort, setReasoningEffort] = useState('medium')
+    const [searchEnabled, setSearchEnabled] = useState(false)
+    const [existingCodexSetting, setExistingCodexSetting] =
+        useState<IMcpSettings | null>(null)
+    const [deviceAuth, setDeviceAuth] = useState<DeviceAuthState | null>(null)
+    const [isConnectingOpenAI, setIsConnectingOpenAI] = useState(false)
+
+    const hasExistingAuth = useMemo(
+        () => hasCodexAuth(existingCodexSetting),
+        [existingCodexSetting]
+    )
 
     const handleCancel = () => {
+        setDeviceAuth(null)
         onOpenChange(false)
     }
 
-    const handleSaveConfig = async () => {
-        // Require at least one of authJson or apiKey
-        if (!authJson.trim() && !apiKey.trim()) {
-            toast.warning('Please provide either Auth JSON or API Key')
-            return
+    const completeCodexSave = (setting?: IMcpSettings) => {
+        if (setting) {
+            setExistingCodexSetting(setting)
         }
+        toast.success('Codex configuration saved and activated successfully')
+        setDeviceAuth(null)
+        setAuthJson('')
+        setApiKey('')
+        onOpenChange(false)
+        onSaveConfig(currentSettingData as ISetting)
+    }
 
-        // Build payload conditionally
+    const handleSaveConfig = async () => {
         const payload: {
             auth_json?: Record<string, unknown>
             model?: string
             apikey?: string
             model_reasoning_effort?: string
             search?: boolean
-        } = {}
+        } = {
+            model: model.trim() || undefined,
+            model_reasoning_effort: reasoningEffort,
+            search: searchEnabled
+        }
 
-        // Validate and attach auth_json only if provided
         if (authJson.trim()) {
             try {
                 payload.auth_json = JSON.parse(authJson)
@@ -73,105 +101,146 @@ const CodexSetting = ({
             }
         }
 
-        if (model.trim()) payload.model = model.trim()
-        if (apiKey.trim()) payload.apikey = apiKey.trim()
-        payload.model_reasoning_effort = reasoningEffort
-        payload.search = searchEnabled
+        if (apiKey.trim()) {
+            payload.apikey = apiKey.trim()
+        }
+
+        if (!payload.auth_json && !payload.apikey && !hasExistingAuth) {
+            toast.warning(
+                'Connect OpenAI or provide Auth JSON / API Key before saving'
+            )
+            return
+        }
 
         try {
-            // Use the settings service with the new configureCodex method
-            // This will create or update the Codex configuration and set is_active to true
-            await settingsService.configureCodex(payload)
-            toast.success(
-                'Codex configuration saved and activated successfully'
-            )
-            onOpenChange(false)
-
-            // Update the settings with codex_tools enabled
-            const newSettings = {
-                ...currentSettingData,
-                codex_tools: true // Set to true since we just activated it
-            }
-            onSaveConfig(newSettings)
+            const setting = await settingsService.configureCodex(payload)
+            completeCodexSave(setting)
         } catch (error: unknown) {
             console.error('Error saving Codex configuration:', error)
             const apiError = error as {
                 response?: { data?: { detail?: string } }
             }
-            const errorMessage =
+            toast.error(
                 apiError.response?.data?.detail ||
-                'Failed to save Codex configuration'
-            toast.error(errorMessage)
+                    'Failed to save Codex configuration'
+            )
+        }
+    }
+
+    const handleConnectOpenAI = async () => {
+        try {
+            setIsConnectingOpenAI(true)
+            const response = await settingsService.startCodexOpenAIDeviceOAuth({
+                model: model.trim() || undefined,
+                model_reasoning_effort: reasoningEffort,
+                search: searchEnabled
+            })
+            setDeviceAuth({
+                loginId: response.login_id,
+                verificationUrl: response.verification_url,
+                userCode: response.user_code,
+                intervalSeconds: response.interval_seconds
+            })
+            window.open(response.verification_url, '_blank', 'noopener,noreferrer')
+        } catch (error: unknown) {
+            console.error('Error starting OpenAI device auth:', error)
+            const apiError = error as {
+                response?: { data?: { detail?: string } }
+            }
+            toast.error(
+                apiError.response?.data?.detail ||
+                    'Failed to start OpenAI connection'
+            )
+        } finally {
+            setIsConnectingOpenAI(false)
         }
     }
 
     useEffect(() => {
-        // Load existing Codex settings when component opens
         const loadCodexSettings = async () => {
-            if (open) {
-                try {
-                    const codexSetting =
-                        await settingsService.getCodexSettings()
+            if (!open) {
+                return
+            }
 
-                    if (codexSetting) {
-                        if (codexSetting.metadata) {
-                            if (codexSetting.metadata.auth_json) {
-                                setAuthJson(
-                                    JSON.stringify(
-                                        codexSetting.metadata.auth_json,
-                                        null,
-                                        2
-                                    )
-                                )
-                            } else {
-                                setAuthJson('')
-                            }
+            try {
+                const codexSetting = await settingsService.getCodexSettings()
+                setExistingCodexSetting(codexSetting)
+                setAuthJson('')
+                setApiKey('')
+                setDeviceAuth(null)
 
-                            if (codexSetting.metadata.model) {
-                                setModel(codexSetting.metadata.model)
-                            }
-
-                            if (codexSetting.metadata.apikey) {
-                                setApiKey(codexSetting.metadata.apikey)
-                            } else {
-                                setApiKey('')
-                            }
-
-                            // Set reasoning effort and search from metadata
-                            if (codexSetting.metadata.model_reasoning_effort) {
-                                setReasoningEffort(
-                                    codexSetting.metadata.model_reasoning_effort
-                                )
-                            } else {
-                                setReasoningEffort('medium')
-                            }
-
-                            if (codexSetting.metadata.search !== undefined) {
-                                setSearchEnabled(codexSetting.metadata.search)
-                            } else {
-                                setSearchEnabled(false)
-                            }
-                        } else {
-                            setAuthJson('')
-                            setApiKey('')
-                            setReasoningEffort('medium')
-                            setSearchEnabled(false)
-                        }
-                    } else {
-                        // Clear fields if no existing settings
-                        setAuthJson('')
-                        setApiKey('')
-                        setReasoningEffort('medium')
-                        setSearchEnabled(false)
-                    }
-                } catch (error) {
-                    console.error('Error loading Codex settings:', error)
+                if (codexSetting?.metadata) {
+                    setModel(codexSetting.metadata.model || 'gpt-5')
+                    setReasoningEffort(
+                        codexSetting.metadata.model_reasoning_effort || 'medium'
+                    )
+                    setSearchEnabled(Boolean(codexSetting.metadata.search))
+                } else {
+                    setModel('gpt-5')
+                    setReasoningEffort('medium')
+                    setSearchEnabled(false)
                 }
+            } catch (error) {
+                console.error('Error loading Codex settings:', error)
             }
         }
 
         loadCodexSettings()
     }, [open])
+
+    useEffect(() => {
+        if (!open || !deviceAuth) {
+            return
+        }
+
+        let isCancelled = false
+        const poll = async () => {
+            try {
+                const response =
+                    await settingsService.pollCodexOpenAIDeviceOAuth({
+                        login_id: deviceAuth.loginId
+                    })
+
+                if (isCancelled || response.status === 'pending') {
+                    return
+                }
+
+                if (response.status === 'completed' && response.setting) {
+                    completeCodexSave(response.setting)
+                    return
+                }
+
+                toast.error(
+                    response.error || 'OpenAI connection failed. Start again.'
+                )
+                setDeviceAuth(null)
+            } catch (error: unknown) {
+                if (isCancelled) {
+                    return
+                }
+                console.error('Error polling OpenAI device auth:', error)
+                const apiError = error as {
+                    response?: { data?: { detail?: string } }
+                }
+                toast.error(
+                    apiError.response?.data?.detail ||
+                        'OpenAI connection failed. Start again.'
+                )
+                setDeviceAuth(null)
+            }
+        }
+
+        const timer = window.setInterval(
+            poll,
+            Math.max(deviceAuth.intervalSeconds, 3) * 1000
+        )
+        void poll()
+
+        return () => {
+            isCancelled = true
+            window.clearInterval(timer)
+        }
+    }, [deviceAuth, open])
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
@@ -189,18 +258,16 @@ const CodexSetting = ({
                                 </p>
                             </div>
                         </div>
-                        <div className="flex items-center gap-x-4">
-                            <SheetClose className="cursor-pointer">
-                                <Icon
-                                    name="arrow-right"
-                                    className="dark:inline hidden"
-                                />
-                                <Icon
-                                    name="arrow-right-dark"
-                                    className="dark:hidden inline"
-                                />
-                            </SheetClose>
-                        </div>
+                        <SheetClose className="cursor-pointer">
+                            <Icon
+                                name="arrow-right"
+                                className="dark:inline hidden"
+                            />
+                            <Icon
+                                name="arrow-right-dark"
+                                className="dark:hidden inline"
+                            />
+                        </SheetClose>
                     </div>
                 </SheetHeader>
                 <div className="overflow-auto pb-4 md:pb-12">
@@ -209,15 +276,12 @@ const CodexSetting = ({
                     </p>
                     <p className="dark:text-white text-sm mt-3">
                         Enable OpenAI Codex for autonomous code generation and
-                        review
+                        review.
                     </p>
                     <Button
                         className="h-[22px] bg-firefly dark:bg-sky-blue-2 text-sky-blue-2 dark:text-black gap-x-[6px] mt-4 text-xs rounded-full !font-normal"
                         onClick={() =>
-                            window.open(
-                                `https://openai.com/vi-VN/codex/`,
-                                '_blank'
-                            )
+                            window.open('https://openai.com/codex/', '_blank')
                         }
                     >
                         <Icon
@@ -226,6 +290,7 @@ const CodexSetting = ({
                         />
                         Remote
                     </Button>
+
                     <div className="mt-6 space-y-4">
                         <div className="space-y-2">
                             <Label
@@ -266,12 +331,113 @@ const CodexSetting = ({
                         </div>
                     </div>
 
+                    <div className="mt-6 rounded-2xl border border-black/10 dark:border-white/10 p-4 space-y-3">
+                        <div className="flex items-start justify-between gap-3">
+                            <div>
+                                <p className="text-base font-semibold dark:text-white">
+                                    OpenAI OAuth
+                                </p>
+                                <p className="mt-1 text-sm dark:text-white/[0.56]">
+                                    Connect your ChatGPT-backed Codex access
+                                    without pasting tokens into the browser.
+                                </p>
+                            </div>
+                            {existingCodexSetting?.metadata?.auth_mode ===
+                                'openai_oauth' && hasExistingAuth && (
+                                <span className="text-xs rounded-full px-2 py-1 bg-emerald-500/15 text-emerald-700 dark:text-emerald-300">
+                                    Connected
+                                </span>
+                            )}
+                        </div>
+
+                        {existingCodexSetting?.metadata?.auth_mode ===
+                            'openai_oauth' &&
+                            hasExistingAuth && (
+                                <div className="text-sm dark:text-white/[0.72] space-y-1">
+                                    {existingCodexSetting.metadata
+                                        ?.chatgpt_plan_type && (
+                                        <p>
+                                            Plan:{' '}
+                                            {
+                                                existingCodexSetting.metadata
+                                                    .chatgpt_plan_type
+                                            }
+                                        </p>
+                                    )}
+                                    {existingCodexSetting.metadata
+                                        ?.chatgpt_account_id && (
+                                        <p>
+                                            Workspace:{' '}
+                                            {
+                                                existingCodexSetting.metadata
+                                                    .chatgpt_account_id
+                                            }
+                                        </p>
+                                    )}
+                                </div>
+                            )}
+
+                        {deviceAuth ? (
+                            <div className="space-y-3 rounded-xl bg-firefly/10 dark:bg-sky-blue-2/5 p-4">
+                                <p className="text-sm font-medium dark:text-white">
+                                    Finish sign-in in your browser
+                                </p>
+                                <p className="text-sm dark:text-white/[0.72]">
+                                    Open the verification page and enter this
+                                    one-time code.
+                                </p>
+                                <div className="rounded-xl bg-black/5 dark:bg-white/5 px-4 py-3">
+                                    <p className="text-xs uppercase tracking-wide dark:text-white/[0.56]">
+                                        Code
+                                    </p>
+                                    <p className="text-lg font-semibold dark:text-white">
+                                        {deviceAuth.userCode}
+                                    </p>
+                                </div>
+                                <div className="flex gap-3">
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="flex-1"
+                                        onClick={() =>
+                                            window.open(
+                                                deviceAuth.verificationUrl,
+                                                '_blank'
+                                            )
+                                        }
+                                    >
+                                        Open Verification Page
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="flex-1"
+                                        onClick={() => setDeviceAuth(null)}
+                                    >
+                                        Cancel
+                                    </Button>
+                                </div>
+                            </div>
+                        ) : (
+                            <Button
+                                type="button"
+                                className="w-full h-12 rounded-xl bg-sky-blue text-black text-base"
+                                disabled={isConnectingOpenAI}
+                                onClick={handleConnectOpenAI}
+                            >
+                                {isConnectingOpenAI
+                                    ? 'Starting OpenAI sign-in...'
+                                    : 'Connect OpenAI'}
+                            </Button>
+                        )}
+                    </div>
+
                     <p className="dark:text-white text-lg font-semibold mt-6">
-                        Auth Json
+                        Manual Fallback
                     </p>
-                    <p className="text-sm mt-3">
-                        Find your auth json at ~/.codex/auth.json (on Windows:
-                        C://Users/USERNAME/.codex/auth.json)
+                    <p className="text-sm mt-3 dark:text-white/[0.72]">
+                        Use this only if you want to paste Codex auth JSON or an
+                        API key directly.
                     </p>
 
                     <div className="space-y-2 relative mt-3">
@@ -282,7 +448,7 @@ const CodexSetting = ({
                         <Textarea
                             id="auth-json"
                             className="pl-[56px] min-h-[144px] mb-4"
-                            placeholder="Enter Codex Auth Json"
+                            placeholder="Enter Codex auth.json contents"
                             value={authJson}
                             onChange={(e) => setAuthJson(e.target.value)}
                         />
@@ -305,6 +471,15 @@ const CodexSetting = ({
                             />
                         </div>
                     </div>
+
+                    {hasExistingAuth && !authJson.trim() && !apiKey.trim() && (
+                        <p className="mt-4 text-sm dark:text-white/[0.56]">
+                            Saving without new credentials will keep the
+                            existing Codex auth and only update model/search
+                            options.
+                        </p>
+                    )}
+
                     <div className="space-y-4 grid grid-cols-2 gap-4 mt-6">
                         <Button
                             type="button"
@@ -316,8 +491,8 @@ const CodexSetting = ({
                         </Button>
                         <Button
                             className="h-12 rounded-xl bg-sky-blue text-black text-base"
-                            disabled={isSavingSetting}
-                            onClick={() => handleSaveConfig()}
+                            disabled={isSavingSetting || isConnectingOpenAI}
+                            onClick={handleSaveConfig}
                         >
                             {isSavingSetting ? 'Saving...' : 'Save'}
                         </Button>

@@ -9,6 +9,10 @@ from ii_agent.settings.mcp.exceptions import MCPSettingNotFoundError
 from ii_agent.settings.mcp.dependencies import MCPSettingServiceDep
 from ii_agent.settings.mcp.schemas import (
     CodexConfigConfigure,
+    CodexOpenAIDevicePollRequest,
+    CodexOpenAIDevicePollResponse,
+    CodexOpenAIDeviceStartRequest,
+    CodexOpenAIDeviceStartResponse,
     ClaudeCodeConfigConfigure,
     MCPSettingCreate,
     MCPSettingUpdate,
@@ -46,6 +50,36 @@ async def configure_codex_mcp(
         model=request.model,
         reasoning_effort=request.model_reasoning_effort,
         search=request.search,
+    )
+
+
+@router.post("/codex/openai/device/start", response_model=CodexOpenAIDeviceStartResponse)
+async def start_codex_openai_device_oauth(
+    request: CodexOpenAIDeviceStartRequest,
+    current_user: CurrentUser,
+    service: MCPSettingServiceDep,
+):
+    """Start the OpenAI Codex device-code OAuth flow."""
+    return await service.start_codex_openai_device_oauth(
+        user_id=str(current_user.id),
+        model=request.model,
+        reasoning_effort=request.model_reasoning_effort,
+        search=request.search,
+    )
+
+
+@router.post("/codex/openai/device/poll", response_model=CodexOpenAIDevicePollResponse)
+async def poll_codex_openai_device_oauth(
+    request: CodexOpenAIDevicePollRequest,
+    current_user: CurrentUser,
+    service: MCPSettingServiceDep,
+    db: DBSession,
+):
+    """Poll the OpenAI Codex device-code OAuth flow."""
+    return await service.poll_codex_openai_device_oauth(
+        db,
+        user_id=str(current_user.id),
+        login_id=request.login_id,
     )
 
 

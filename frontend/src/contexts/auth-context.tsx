@@ -20,6 +20,7 @@ import { createContext, useContext, useEffect, ReactNode, useCallback } from 're
 interface AuthContextType {
     user: User | null
     isAuthenticated: boolean
+    completeTokenLogin: (accessToken: string) => Promise<void>
     loginWithAuthCode: (authCode: string) => Promise<void>
     logout: () => void
     isLoading: boolean
@@ -58,6 +59,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             console.log('Failed to fetch llm models', error)
         }
     }, [dispatch])
+
+    const completeTokenLogin = useCallback(
+        async (accessToken: string) => {
+            localStorage.setItem(ACCESS_TOKEN, accessToken)
+            window.dispatchEvent(new CustomEvent('auth-token-set'))
+
+            const userRes = await authService.getCurrentUser()
+            dispatch(setUser(userRes))
+            await fetchAvailableModels()
+            dispatch(fetchWishlist())
+            dispatch(fetchPins())
+        },
+        [dispatch, fetchAvailableModels]
+    )
 
     useEffect(() => {
         const initializeAuth = async () => {
@@ -106,19 +121,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
                 code,
                 redirect_uri: window.location.origin
             })
-
-            // Store the access token immediately to trigger WebSocket connection
-            localStorage.setItem(ACCESS_TOKEN, res.access_token)
-            // Dispatch a custom event to notify WebSocket to connect immediately
-            window.dispatchEvent(new CustomEvent('auth-token-set'))
-
-            // Get user information using the access token (in parallel with WebSocket connection)
-            const userRes = await authService.getCurrentUser()
-            dispatch(setUser(userRes))
-            await fetchAvailableModels()
-            // Fetch user's wishlist and pins after successful login
-            dispatch(fetchWishlist())
-            dispatch(fetchPins())
+            await completeTokenLogin(res.access_token)
         } catch (error) {
             console.error('Error handling auth code:', error)
             throw error
@@ -138,6 +141,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const value: AuthContextType = {
         user,
         isAuthenticated,
+        completeTokenLogin,
         loginWithAuthCode,
         logout,
         isLoading
