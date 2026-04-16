@@ -25,7 +25,13 @@ class AuthConfigService:
     """Service for managing Composio authentication configurations."""
 
     def __init__(self, api_key: Optional[str] = None):
-        self.client = ComposioClient.get_client(api_key)
+        self._api_key = api_key
+        self.client = None
+
+    def _get_client(self):
+        if self.client is None:
+            self.client = ComposioClient.get_client(self._api_key)
+        return self.client
 
     def build_custom_auth_config(
         self, prefix_toolkit_slug_composio: str
@@ -100,7 +106,7 @@ class AuthConfigService:
                     for field_name, field_value in custom_auth_config.items()
                     if field_value
                 }
-                response = self.client.auth_configs.create(
+                response = self._get_client().auth_configs.create(
                     toolkit_slug,
                     {
                         "type": "use_custom_auth",
@@ -109,7 +115,7 @@ class AuthConfigService:
                     },
                 )
             else:
-                response = self.client.auth_configs.create(
+                response = self._get_client().auth_configs.create(
                     toolkit_slug,
                     {
                         "type": "use_composio_managed_auth",
@@ -141,7 +147,7 @@ class AuthConfigService:
         """Get authentication configuration by ID."""
         try:
             logger.debug(f"Fetching auth config: {auth_config_id}")
-            response = self.client.auth_configs.get(auth_config_id)
+            response = self._get_client().auth_configs.get(auth_config_id)
             if not response:
                 return None
             return AuthConfig(
@@ -158,7 +164,7 @@ class AuthConfigService:
         """Delete authentication configuration by ID."""
         try:
             logger.debug(f"Deleting auth config: {auth_config_id}")
-            self.client.auth_configs.delete(auth_config_id)
+            self._get_client().auth_configs.delete(auth_config_id)
             logger.info(f"Successfully deleted auth config: {auth_config_id}")
             return True
         except Exception as e:

@@ -27,6 +27,7 @@ import CodexSetting from './codex-setting'
 import ClaudeCodeSetting from './claude-code-setting'
 import { selectQuestionMode } from '@/state'
 import { useTranslation } from 'react-i18next'
+import { hasCodexAuth } from '@/lib/codex'
 
 interface ToolSettingProps {
     className?: string
@@ -244,7 +245,8 @@ const ToolSetting = ({ className }: ToolSettingProps) => {
         if (checked) {
             // When toggling on, check if Codex is configured
             const codexSettings = await settingsService.getCodexSettings()
-            if (!codexSettings || !codexSettings.metadata?.auth_json) {
+            const codexConfigured = hasCodexAuth(codexSettings)
+            if (!codexSettings || !codexConfigured) {
                 // Navigate to Codex settings if not configured
                 setCodexOpenCodexSettingTab(true)
                 return false // Don't enable the toggle since no content exists

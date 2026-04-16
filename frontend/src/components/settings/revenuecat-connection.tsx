@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { ACCESS_TOKEN } from '@/constants/auth'
 import { cn } from '@/lib/utils'
 import { connectorService } from '@/services/connector.service'
 import {
@@ -25,8 +26,11 @@ export const RevenueCatConnection = ({
 }: RevenueCatConnectionProps) => {
     const { t } = useTranslation()
     const dispatch = useAppDispatch()
+    const hasAccessToken = Boolean(localStorage.getItem(ACCESS_TOKEN))
     const { data: statusData, isLoading: isRevenueCatLoading } =
-        useGetRevenueCatStatusQuery()
+        useGetRevenueCatStatusQuery(undefined, {
+            skip: !hasAccessToken
+        })
     const isRevenueCatConnected = statusData?.is_connected ?? false
     const [disconnectRevenueCat] = useDisconnectRevenueCatMutation()
 

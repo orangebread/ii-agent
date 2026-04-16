@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
+import { ACCESS_TOKEN } from '@/constants/auth'
 import { cn } from '@/lib/utils'
 import { connectorService } from '@/services/connector.service'
 import {
@@ -17,8 +18,11 @@ type GoogleDriveAction = 'connect' | 'disconnect' | null
 export const GoogleDriveConnection = () => {
     const { t } = useTranslation()
     const dispatch = useAppDispatch()
+    const hasAccessToken = Boolean(localStorage.getItem(ACCESS_TOKEN))
     const { data: statusData, isLoading: isGoogleDriveLoading } =
-        useGetGoogleDriveStatusQuery()
+        useGetGoogleDriveStatusQuery(undefined, {
+            skip: !hasAccessToken
+        })
     const isGoogleDriveConnected = statusData?.is_connected ?? false
     const [disconnectGoogleDrive] = useDisconnectGoogleDriveMutation()
 

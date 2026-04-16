@@ -3,6 +3,7 @@ import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 
 import { Button } from '@/components/ui/button'
+import { ACCESS_TOKEN } from '@/constants/auth'
 import { cn } from '@/lib/utils'
 import { connectorService } from '@/services/connector.service'
 import {
@@ -17,8 +18,11 @@ type GitHubAction = 'connect' | 'disconnect' | null
 export const GitHubConnection = () => {
     const { t } = useTranslation()
     const dispatch = useAppDispatch()
+    const hasAccessToken = Boolean(localStorage.getItem(ACCESS_TOKEN))
     const { data: statusData, isLoading: isGitHubLoading } =
-        useGetGitHubStatusQuery()
+        useGetGitHubStatusQuery(undefined, {
+            skip: !hasAccessToken
+        })
     const isGitHubConnected = statusData?.is_connected ?? false
     const [disconnectGitHub] = useDisconnectGitHubMutation()
 
@@ -28,12 +32,16 @@ export const GitHubConnection = () => {
 
     // Fetch app config separately (not frequently accessed, so no need for RTK Query)
     useEffect(() => {
+        if (!hasAccessToken) {
+            return
+        }
+
         connectorService.getGitHubAppConfig().then((appConfig) => {
             setInstallationUrl(appConfig.installation_url)
         }).catch((error) => {
             console.error('Failed to load GitHub app config', error)
         })
-    }, [])
+    }, [hasAccessToken])
 
     const handleGitHubConnect = async () => {
         if (isGitHubProcessing) return

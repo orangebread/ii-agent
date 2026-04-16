@@ -9,6 +9,8 @@ pytestmark = pytest.mark.unit
 EXPECTED_ROUTES = {
     ("GET", "/mcp/codex"),
     ("POST", "/mcp/codex"),
+    ("POST", "/mcp/codex/openai/device/start"),
+    ("POST", "/mcp/codex/openai/device/poll"),
     ("GET", "/mcp/claude-code"),
     ("POST", "/mcp/claude-code"),
     ("POST", "/mcp"),

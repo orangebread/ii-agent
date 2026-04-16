@@ -64,7 +64,13 @@ class MCPServerService:
 
     def __init__(self, api_key: Optional[str] = None):
         """Initialize the MCP server service."""
-        self.client = ComposioClient.get_client(api_key)
+        self._api_key = api_key
+        self.client = None
+
+    def _get_client(self):
+        if self.client is None:
+            self.client = ComposioClient.get_client(self._api_key)
+        return self.client
 
     def _generate_cuid(self) -> str:
         """Generate a random CUID-like string."""
@@ -114,7 +120,7 @@ class MCPServerService:
         allowed_tools: Optional[List[str]],
     ):
         """Call MCP create API using new SDK signature."""
-        return self.client.mcp.create(
+        return self._get_client().mcp.create(
             name=name,
             toolkits=toolkits,
             allowed_tools=allowed_tools or None,
@@ -122,11 +128,11 @@ class MCPServerService:
 
     def _call_generate_mcp_url(self, mcp_server_id: str, user_id: str):
         """Generate a user-scoped MCP URL using new SDK signature."""
-        return self.client.mcp.generate(user_id=user_id, mcp_config_id=mcp_server_id)
+        return self._get_client().mcp.generate(user_id=user_id, mcp_config_id=mcp_server_id)
 
     def _call_mcp_get(self, mcp_server_id: str):
         """Retrieve MCP server details."""
-        return self.client.mcp.get(mcp_server_id)
+        return self._get_client().mcp.get(mcp_server_id)
 
     def _call_mcp_update(
         self,
@@ -135,7 +141,7 @@ class MCPServerService:
         allowed_tools: Optional[List[str]] = None,
     ):
         """Update MCP server with new toolkits."""
-        return self.client.mcp.update(
+        return self._get_client().mcp.update(
             server_id=mcp_server_id,
             toolkits=toolkits,
             allowed_tools=allowed_tools or None,

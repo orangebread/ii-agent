@@ -99,6 +99,22 @@ class TestLLMSettingRepositoryR4:
         mock_db.delete.assert_called_once_with(mock_setting)
         mock_db.flush.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_create_persists_setting_via_base_repository(self):
+        repo = self._make_repo()
+        mock_db = AsyncMock()
+        mock_db.add = MagicMock()
+        mock_db.flush = AsyncMock()
+        mock_db.refresh = AsyncMock()
+        mock_setting = MagicMock()
+
+        result = await repo.create(mock_db, mock_setting)
+
+        assert result is mock_setting
+        mock_db.add.assert_called_once_with(mock_setting)
+        mock_db.flush.assert_awaited_once()
+        mock_db.refresh.assert_awaited_once_with(mock_setting)
+
 
 # ---------------------------------------------------------------------------
 # MCPSettingRepository
@@ -203,6 +219,22 @@ class TestMCPSettingRepositoryR4:
         mock_db.delete.assert_called_once_with(mock_setting)
         mock_db.flush.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_create_persists_setting_via_base_repository(self):
+        repo = self._make_repo()
+        mock_db = AsyncMock()
+        mock_db.add = MagicMock()
+        mock_db.flush = AsyncMock()
+        mock_db.refresh = AsyncMock()
+        mock_setting = MagicMock()
+
+        result = await repo.create(mock_db, mock_setting)
+
+        assert result is mock_setting
+        mock_db.add.assert_called_once_with(mock_setting)
+        mock_db.flush.assert_awaited_once()
+        mock_db.refresh.assert_awaited_once_with(mock_setting)
+
 
 # ---------------------------------------------------------------------------
 # FileSettingsStore
@@ -256,9 +288,7 @@ class TestFileSettingsStoreR4:
     async def test_get_instance_returns_store(self):
         from ii_agent.settings.llm.store.file_settings_store import FileSettingsStore
 
-        with patch(
-            "ii_agent.settings.llm.store.file_settings_store.default_storage"
-        ) as mock_storage:
+        with patch("ii_agent.settings.llm.store.file_settings_store.default_storage"):
             store = await FileSettingsStore.get_instance(config=MagicMock(), user_id="user-1")
         assert isinstance(store, FileSettingsStore)
 
@@ -266,9 +296,7 @@ class TestFileSettingsStoreR4:
     async def test_get_instance_no_user_id(self):
         from ii_agent.settings.llm.store.file_settings_store import FileSettingsStore
 
-        with patch(
-            "ii_agent.settings.llm.store.file_settings_store.default_storage"
-        ) as mock_storage:
+        with patch("ii_agent.settings.llm.store.file_settings_store.default_storage"):
             store = await FileSettingsStore.get_instance(config=MagicMock(), user_id=None)
         assert isinstance(store, FileSettingsStore)
 

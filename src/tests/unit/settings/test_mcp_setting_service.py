@@ -1,10 +1,11 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from ii_agent.settings.mcp.exceptions import MCPOAuthError
 from ii_agent.settings.mcp.schemas import MCPServersConfig
-from ii_agent.settings.mcp.service import MCPSettingService
+from ii_agent.settings.mcp.service import MCPSettingService, _extract_codex_auth_json
 
 
 class FakeMCPRepo:
@@ -86,3 +87,123 @@ async def test_configure_claude_code_validates_authorization_format(settings_fac
             user_id="u1",
             authorization_code="invalid-format",
         )
+
+
+@pytest.mark.asyncio
+async def test_start_codex_openai_device_oauth_returns_login_data(settings_factory):
+    service = MCPSettingService(repo=FakeMCPRepo(), config=settings_factory())
+
+    with patch(
+        "ii_agent.settings.mcp.service._request_openai_device_code",
+        new=AsyncMock(
+            return_value={
+                "device_auth_id": "device-auth-123",
+                "user_code": "ABCD-1234",
+                "interval_seconds": 5,
+                "verification_url": "https://auth.openai.com/codex/device",
+            }
+        ),
+    ):
+        result = await service.start_codex_openai_device_oauth(
+            user_id="u1",
+            model="gpt-5",
+            reasoning_effort="medium",
+            search=True,
+        )
+
+    assert result.user_code == "ABCD-1234"
+    assert result.verification_url == "https://auth.openai.com/codex/device"
+    assert result.login_id
+
+
+@pytest.mark.asyncio
+async def test_poll_codex_openai_device_oauth_returns_pending(settings_factory):
+    service = MCPSettingService(repo=FakeMCPRepo(), config=settings_factory())
+
+    with patch(
+        "ii_agent.settings.mcp.service._request_openai_device_code",
+        new=AsyncMock(
+            return_value={
+                "device_auth_id": "device-auth-123",
+                "user_code": "ABCD-1234",
+                "interval_seconds": 5,
+                "verification_url": "https://auth.openai.com/codex/device",
+            }
+        ),
+    ):
+        start = await service.start_codex_openai_device_oauth(
+            user_id="u1",
+            model="gpt-5",
+            reasoning_effort="medium",
+            search=False,
+        )
+
+    with patch(
+        "ii_agent.settings.mcp.service._poll_openai_device_code",
+        new=AsyncMock(return_value=None),
+    ):
+        result = await service.poll_codex_openai_device_oauth(
+            db=None,
+            user_id="u1",
+            login_id=start.login_id,
+        )
+
+    assert result.status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_poll_codex_openai_device_oauth_persists_codex_setting(settings_factory):
+    repo = FakeMCPRepo()
+    service = MCPSettingService(repo=repo, config=settings_factory())
+
+    with patch(
+        "ii_agent.settings.mcp.service._request_openai_device_code",
+        new=AsyncMock(
+            return_value={
+                "device_auth_id": "device-auth-123",
+                "user_code": "ABCD-1234",
+                "interval_seconds": 5,
+                "verification_url": "https://auth.openai.com/codex/device",
+            }
+        ),
+    ):
+        start = await service.start_codex_openai_device_oauth(
+            user_id="u1",
+            model="gpt-5",
+            reasoning_effort="medium",
+            search=True,
+        )
+
+    with (
+        patch(
+            "ii_agent.settings.mcp.service._poll_openai_device_code",
+            new=AsyncMock(
+                return_value={
+                    "authorization_code": "auth-code",
+                    "code_verifier": "verifier-123",
+                }
+            ),
+        ),
+        patch(
+            "ii_agent.settings.mcp.service._exchange_openai_device_code",
+            new=AsyncMock(
+                return_value={
+                    "id_token": "eyJhbGciOiJub25lIn0.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9wbGFuX3R5cGUiOiJwbHVzIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoib3JnLTEyMyJ9fQ.c2ln",
+                    "access_token": "access-123",
+                    "refresh_token": "refresh-123",
+                }
+            ),
+        ),
+    ):
+        result = await service.poll_codex_openai_device_oauth(
+            db=None,
+            user_id="u1",
+            login_id=start.login_id,
+        )
+
+    assert result.status == "completed"
+    assert len(repo.created) == 1
+    stored = repo.created[0]
+    auth_json = _extract_codex_auth_json(stored.mcp_metadata)
+    assert auth_json["tokens"]["refresh_token"] == "refresh-123"
+    assert stored.mcp_metadata["auth_mode"] == "openai_oauth"

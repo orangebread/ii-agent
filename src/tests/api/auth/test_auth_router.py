@@ -7,10 +7,13 @@ pytestmark = pytest.mark.unit
 
 
 EXPECTED_ROUTES = {
+    ("GET", "/auth/providers"),
     ("GET", "/auth/oauth/ii/login"),
     ("GET", "/auth/oauth/ii/callback"),
     ("GET", "/auth/oauth/google/login"),
     ("GET", "/auth/oauth/google/callback"),
+    ("POST", "/auth/oauth/openai/device/start"),
+    ("POST", "/auth/oauth/openai/device/poll"),
     ("GET", "/auth/me"),
 }
 

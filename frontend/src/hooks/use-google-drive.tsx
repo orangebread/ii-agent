@@ -6,6 +6,7 @@ import {
 import { toast } from 'sonner'
 import { AxiosError } from 'axios'
 import { useGetGoogleDriveStatusQuery, connectorApi, useAppDispatch } from '@/state'
+import { ACCESS_TOKEN } from '@/constants/auth'
 
 interface GoogleDrivePickerConfig {
     accessToken: string
@@ -43,7 +44,10 @@ const handleAuthError = (
 
 export const useGoogleDrive = () => {
     const dispatch = useAppDispatch()
-    const { data: statusData } = useGetGoogleDriveStatusQuery()
+    const hasAccessToken = Boolean(localStorage.getItem(ACCESS_TOKEN))
+    const { data: statusData } = useGetGoogleDriveStatusQuery(undefined, {
+        skip: !hasAccessToken
+    })
     const isConnected = statusData?.is_connected ?? false
 
     const [isAuthLoading, setIsAuthLoading] = useState(false)
