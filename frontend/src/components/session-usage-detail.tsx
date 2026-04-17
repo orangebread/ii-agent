@@ -19,6 +19,7 @@ import {
 } from './ui/table'
 import { Icon } from './ui/icon'
 import { Checkbox } from './ui/checkbox'
+import { IS_LOCAL_DEPLOYMENT } from '@/constants/features'
 
 const formatCredit = (value: number) =>
     value.toLocaleString('en-US', {
@@ -28,6 +29,16 @@ const formatCredit = (value: number) =>
 
 const formatTokens = (value: number) =>
     value > 0 ? value.toLocaleString('en-US') : '-'
+
+const formatUsd = (value: number | null | undefined) =>
+    value != null
+        ? value.toLocaleString('en-US', {
+              style: 'currency',
+              currency: 'USD',
+              minimumFractionDigits: 4,
+              maximumFractionDigits: 4
+          })
+        : '-'
 
 const getBillingLabel = (item: {
     billing_kind: string
@@ -43,7 +54,10 @@ const getBillingLabel = (item: {
     return item.billing_kind
 }
 
-const getBillingType = (item: { billing_kind: string; tool_name: string | null }) => {
+const getBillingType = (item: {
+    billing_kind: string
+    tool_name: string | null
+}) => {
     if (item.tool_name || item.billing_kind === 'tool_usage') {
         return 'Tool'
     }
@@ -66,6 +80,18 @@ const SessionUsageDetail = () => {
         if (!hideZeroCost) return data.items
         return data.items.filter((item) => item.credits_charged !== 0)
     }, [data?.items, hideZeroCost])
+
+    const totalUsd = useMemo(() => {
+        if (!data?.items?.length) return null
+
+        const values = data.items
+            .map((item) => item.cost_usd)
+            .filter((value): value is number => value != null)
+
+        if (!values.length) return null
+
+        return values.reduce((sum, value) => sum + value, 0)
+    }, [data?.items])
 
     const handleBack = () => {
         navigate('/settings')
@@ -132,7 +158,9 @@ const SessionUsageDetail = () => {
                                         {t('credit.table.date')}
                                     </TableHead>
                                     <TableHead className="py-4 text-lg text-right w-[15%]">
-                                        Credits
+                                        {IS_LOCAL_DEPLOYMENT
+                                            ? 'Estimated cost'
+                                            : 'Credits'}
                                     </TableHead>
                                 </TableRow>
                             </TableHeader>
@@ -147,17 +175,16 @@ const SessionUsageDetail = () => {
                                         </TableCell>
                                     </TableRow>
                                 )}
-                                {!isLoading &&
-                                    filteredItems.length === 0 && (
-                                        <TableRow>
-                                            <TableCell
-                                                className="py-6 pl-6"
-                                                colSpan={6}
-                                            >
-                                                {t('credit.noRecords')}
-                                            </TableCell>
-                                        </TableRow>
-                                    )}
+                                {!isLoading && filteredItems.length === 0 && (
+                                    <TableRow>
+                                        <TableCell
+                                            className="py-6 pl-6"
+                                            colSpan={6}
+                                        >
+                                            {t('credit.noRecords')}
+                                        </TableCell>
+                                    </TableRow>
+                                )}
 
                                 {!isLoading &&
                                     filteredItems.map((item) => {
@@ -203,12 +230,18 @@ const SessionUsageDetail = () => {
                                                     {dayjs
                                                         .utc(item.created_at)
                                                         .local()
-                                                        .format('DD MMM, HH:mm')}
+                                                        .format(
+                                                            'DD MMM, HH:mm'
+                                                        )}
                                                 </TableCell>
                                                 <TableCell className="pt-4 text-sm text-right w-[15%] tabular-nums">
-                                                    {formatCredit(
-                                                        item.credits_charged
-                                                    )}
+                                                    {IS_LOCAL_DEPLOYMENT
+                                                        ? formatUsd(
+                                                              item.cost_usd
+                                                          )
+                                                        : formatCredit(
+                                                              item.credits_charged
+                                                          )}
                                                 </TableCell>
                                             </TableRow>
                                         )
@@ -230,9 +263,11 @@ const SessionUsageDetail = () => {
                                                 )
                                             </TableCell>
                                             <TableCell className="py-4 text-sm text-right font-semibold tabular-nums">
-                                                {formatCredit(
-                                                    data.total_credits
-                                                )}
+                                                {IS_LOCAL_DEPLOYMENT
+                                                    ? formatUsd(totalUsd)
+                                                    : formatCredit(
+                                                          data.total_credits
+                                                      )}
                                             </TableCell>
                                         </TableRow>
                                     </TableFooter>

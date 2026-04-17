@@ -186,7 +186,17 @@ const AddEditModel = ({
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="pt-3 md:pt-12 w-full !max-w-[480px]">
+            <SheetContent
+                className="pt-3 md:pt-12 w-full !max-w-[480px]"
+                accessibleTitle={
+                    isEditing
+                        ? t('agentSetting.addEditModel.title.edit')
+                        : t('agentSetting.addEditModel.title.add')
+                }
+                accessibleDescription={t(
+                    'agentSetting.addEditModel.description'
+                )}
+            >
                 <SheetHeader className="px-3 md:px-6 pt-0 gap-1 pb-4">
                     <div className="flex items-center justify-between">
                         <p className="text-2xl font-semibold">

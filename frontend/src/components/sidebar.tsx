@@ -57,7 +57,11 @@ import { QUESTION_MODE, TAB } from '@/typings/agent'
 import { useSessionStateManager } from '@/hooks/use-session-state-manager'
 import Credit from './credit'
 import { useGetCreditBalanceQuery } from '@/state'
-import { ENABLE_BETA } from '@/constants/features'
+import {
+    ENABLE_BETA,
+    IS_LOCAL_DEPLOYMENT,
+    SHOW_BILLING_UI
+} from '@/constants/features'
 import ChatList from './chat-list'
 import ProjectList from './project-list'
 import UserProfileDropdown from './user-profile-dropdown'
@@ -91,8 +95,8 @@ const Sidebar = ({ className, workspaceInfo }: SidebarButtonProps) => {
     const limit = useAppSelector(selectSessionsLimit)
     const chatMediaPreference = useAppSelector(selectChatMediaPreference)
 
-    // Use RTK Query hook to fetch credit balance
-    useGetCreditBalanceQuery()
+    // Preload credit balance only when the hosted billing UI is visible.
+    useGetCreditBalanceQuery(undefined, { skip: !SHOW_BILLING_UI })
 
     // Get session ID from either URL params or query parameter
     const sessionId = sessionIdFromParams || searchParams.get('id') || ''
@@ -158,10 +162,6 @@ const Sidebar = ({ className, workspaceInfo }: SidebarButtonProps) => {
         if (isMobile) {
             toggleSidebar()
         }
-    }
-
-    const handleGotoSubscription = () => {
-        navigate('/settings/subscription')
     }
 
     const handleScroll = useCallback(() => {
@@ -287,22 +287,34 @@ const Sidebar = ({ className, workspaceInfo }: SidebarButtonProps) => {
                     <div className="px-3 md:px-6 pb-6">
                         <div className="flex md:hidden mb-6 items-center justify-between">
                             <div className="flex items-center gap-2 flex-1">
-                                <UserProfileDropdown showPlan />
+                                <UserProfileDropdown
+                                    showPlan={SHOW_BILLING_UI}
+                                />
                             </div>
                             <Tooltip>
                                 <TooltipTrigger asChild>
                                     <Button
                                         size="xl"
                                         className="bg-firefly dark:bg-sky-blue-2 text-sky-blue-2 dark:text-black rounded-full text-sm font-semibold px-3 py-[6px] h-auto"
-                                        onClick={handleGotoSubscription}
+                                        onClick={() =>
+                                            navigate(
+                                                IS_LOCAL_DEPLOYMENT
+                                                    ? '/settings/usage'
+                                                    : '/settings/subscription'
+                                            )
+                                        }
                                     >
                                         <span className="group-data-[collapsible=icon]:hidden text-sm">
-                                            {t('upgrade.title')}
+                                            {IS_LOCAL_DEPLOYMENT
+                                                ? t('settings.tabs.usage')
+                                                : t('upgrade.title')}
                                         </span>
                                     </Button>
                                 </TooltipTrigger>
                                 <TooltipContent side="bottom">
-                                    {t('upgrade.title')}
+                                    {IS_LOCAL_DEPLOYMENT
+                                        ? t('settings.tabs.usage')
+                                        : t('upgrade.title')}
                                 </TooltipContent>
                             </Tooltip>
                         </div>

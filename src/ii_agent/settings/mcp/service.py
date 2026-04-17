@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import base64
 import json
+import hashlib
+import secrets
 import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from itsdangerous import BadSignature, URLSafeSerializer
@@ -21,6 +24,7 @@ from ii_agent.settings.mcp.models import MCPSetting
 from ii_agent.settings.mcp.repository import MCPSettingRepository
 from ii_agent.settings.mcp.schemas import (
     ClaudeCodeMetadata,
+    ClaudeCodeOAuthStartResponse,
     CodexMetadata,
     CodexOpenAIDevicePollResponse,
     CodexOpenAIDeviceStartResponse,
@@ -33,6 +37,11 @@ from ii_agent.settings.mcp.schemas import (
 )
 
 OPENAI_DEVICE_CODE_TTL_SECONDS = 15 * 60
+CLAUDE_CODE_OAUTH_SALT = "claude-code-oauth"
+CLAUDE_CODE_OAUTH_SCOPES = (
+    "org:create_api_key user:profile user:inference "
+    "user:sessions:claude_code user:mcp_servers user:file_upload"
+)
 
 
 class MCPSettingService:
@@ -285,6 +294,68 @@ class MCPSettingService:
         )
         return CodexOpenAIDevicePollResponse(status="completed", setting=setting)
 
+    async def start_claude_code_oauth(
+        self,
+        *,
+        user_id: uuid.UUID,
+        redirect_uri: str,
+    ) -> ClaudeCodeOAuthStartResponse:
+        """Create the Claude Code OAuth authorization URL for the authenticated user."""
+        sanitized_redirect_uri = _sanitize_claude_code_redirect_uri(self._config, redirect_uri)
+        verifier, challenge = _generate_pkce_pair()
+        login_id = _create_claude_code_oauth_login_id(
+            self._config,
+            user_id=str(user_id),
+            verifier=verifier,
+            redirect_uri=sanitized_redirect_uri,
+        )
+        auth_params = urlencode(
+            {
+                "code": "true",
+                "client_id": self._config.mcp.anthropic_oauth_client_id,
+                "response_type": "code",
+                "redirect_uri": sanitized_redirect_uri,
+                "scope": CLAUDE_CODE_OAUTH_SCOPES,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "state": verifier,
+            }
+        )
+        authorization_url = (
+            f"{self._config.mcp.anthropic_oauth_authorize_url.rstrip('/')}?{auth_params}"
+        )
+        return ClaudeCodeOAuthStartResponse(
+            login_id=login_id,
+            authorization_url=authorization_url,
+        )
+
+    async def complete_claude_code_oauth(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        login_id: str,
+        code: str,
+        state: str,
+    ) -> MCPSettingInfo:
+        """Complete the Claude Code OAuth flow and persist the MCP setting."""
+        login_state = _verify_claude_code_oauth_login_id(
+            self._config,
+            login_id,
+            expected_user_id=str(user_id),
+        )
+        verifier = login_state["verifier"]
+        if state != verifier:
+            raise MCPOAuthError("Anthropic OAuth state mismatch. Start the Claude login again.")
+
+        return await self._configure_claude_code_with_code_and_verifier(
+            db,
+            user_id=user_id,
+            code=code,
+            verifier=verifier,
+            redirect_uri=login_state["redirect_uri"],
+        )
+
     async def configure_claude_code(
         self,
         db: AsyncSession,
@@ -298,7 +369,30 @@ class MCPSettingService:
             raise MCPOAuthError("Invalid authorization code format. Expected format: code#verifier")
 
         code, verifier = splits
-        tokens = await _exchange_code_for_tokens(code, verifier, self._config.mcp)
+        return await self._configure_claude_code_with_code_and_verifier(
+            db,
+            user_id=user_id,
+            code=code,
+            verifier=verifier,
+            redirect_uri=self._config.mcp.anthropic_oauth_redirect_uri,
+        )
+
+    async def _configure_claude_code_with_code_and_verifier(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        code: str,
+        verifier: str,
+        redirect_uri: str,
+    ) -> MCPSettingInfo:
+        """Exchange OAuth code, build Claude Code MCP config and create-or-update."""
+        tokens = await _exchange_code_for_tokens(
+            code,
+            verifier,
+            self._config.mcp,
+            redirect_uri=redirect_uri,
+        )
 
         auth_json = {
             "claudeAiOauth": {
@@ -361,7 +455,88 @@ class MCPSettingService:
         )
 
 
-async def _exchange_code_for_tokens(code: str, verifier: str, mcp_config: MCPSettings) -> dict:
+def _generate_pkce_pair() -> tuple[str, str]:
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(40)).rstrip(b"=").decode("ascii")
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
+
+
+def _get_claude_code_oauth_serializer(config: Settings) -> URLSafeSerializer:
+    return URLSafeSerializer(config.oauth.session_secret_key, salt=CLAUDE_CODE_OAUTH_SALT)
+
+
+def _create_claude_code_oauth_login_id(
+    config: Settings,
+    *,
+    user_id: str,
+    verifier: str,
+    redirect_uri: str,
+) -> str:
+    return _get_claude_code_oauth_serializer(config).dumps(
+        {
+            "user_id": user_id,
+            "verifier": verifier,
+            "redirect_uri": redirect_uri,
+            "expires_at": int(datetime.now(timezone.utc).timestamp())
+            + OPENAI_DEVICE_CODE_TTL_SECONDS,
+        }
+    )
+
+
+def _verify_claude_code_oauth_login_id(
+    config: Settings,
+    login_id: str,
+    *,
+    expected_user_id: str,
+) -> dict[str, Any]:
+    try:
+        state = _get_claude_code_oauth_serializer(config).loads(login_id)
+    except BadSignature as exc:
+        raise MCPOAuthError("Invalid Claude Code OAuth state. Start again.") from exc
+
+    if str(state.get("user_id") or "") != expected_user_id:
+        raise MCPOAuthError("Claude Code OAuth state does not belong to this user.")
+    if int(state.get("expires_at", 0)) < int(datetime.now(timezone.utc).timestamp()):
+        raise MCPOAuthError("Claude Code OAuth expired. Start again.")
+    return state
+
+
+def _sanitize_claude_code_redirect_uri(config: Settings, redirect_uri: str) -> str:
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise MCPOAuthError("Claude Code redirect URI must be an absolute URL.")
+    if parsed.path != "/claude-code-callback":
+        raise MCPOAuthError("Claude Code redirect URI must use /claude-code-callback.")
+
+    allowed_origins = set()
+    frontend_origin = urlparse(config.ii_frontend_url)
+    if frontend_origin.scheme and frontend_origin.netloc:
+        allowed_origins.add(f"{frontend_origin.scheme}://{frontend_origin.netloc}")
+    if config.environment == "local":
+        allowed_origins.update(
+            {
+                "http://localhost:1420",
+                "http://127.0.0.1:1420",
+                "http://localhost:5173",
+                "http://127.0.0.1:5173",
+            }
+        )
+
+    redirect_origin = f"{parsed.scheme}://{parsed.netloc}"
+    if redirect_origin not in allowed_origins:
+        raise MCPOAuthError("Claude Code redirect URI origin is not allowed.")
+
+    return redirect_uri
+
+
+async def _exchange_code_for_tokens(
+    code: str,
+    verifier: str,
+    mcp_config: MCPSettings,
+    *,
+    redirect_uri: str,
+) -> dict:
     """Exchange authorization code for access and refresh tokens."""
     async with httpx.AsyncClient(timeout=15) as client:
         response = await client.post(
@@ -372,7 +547,7 @@ async def _exchange_code_for_tokens(code: str, verifier: str, mcp_config: MCPSet
                 "state": verifier,
                 "grant_type": "authorization_code",
                 "client_id": mcp_config.anthropic_oauth_client_id,
-                "redirect_uri": mcp_config.anthropic_oauth_redirect_uri,
+                "redirect_uri": redirect_uri,
                 "code_verifier": verifier,
             },
         )

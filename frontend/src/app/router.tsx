@@ -289,6 +289,15 @@ const createAppRouter = () =>
                     }
                 },
                 {
+                    path: 'claude-code-callback',
+                    async lazy() {
+                        const { ClaudeCodeCallback } = await import(
+                            '@/app/routes/claude-code-callback'
+                        )
+                        return { Component: ClaudeCodeCallback }
+                    }
+                },
+                {
                     path: 'auth/oauth/composio/callback',
                     async lazy() {
                         const { ComposioOAuthCallback } = await import(

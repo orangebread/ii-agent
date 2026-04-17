@@ -4,17 +4,25 @@ import { useNavigate } from 'react-router'
 import { toast } from 'sonner'
 
 import Cancel from '@/assets/cancel.json'
+import { IS_LOCAL_DEPLOYMENT } from '@/constants/features'
 
 const BillingCancel = () => {
     const navigate = useNavigate()
 
     useEffect(() => {
         toast.info(
-            'Checkout cancelled. No changes were made to your subscription.'
+            IS_LOCAL_DEPLOYMENT
+                ? 'Billing is disabled in local mode.'
+                : 'Checkout cancelled. No changes were made to your subscription.'
         )
 
         const timer = setTimeout(() => {
-            navigate('/settings/subscription', { replace: true })
+            navigate(
+                IS_LOCAL_DEPLOYMENT
+                    ? '/settings/usage'
+                    : '/settings/subscription',
+                { replace: true }
+            )
         }, 2000)
 
         return () => clearTimeout(timer)
@@ -31,14 +39,19 @@ const BillingCancel = () => {
                     />
                 </div>
                 <h1 className="text-2xl font-semibold text-firefly dark:text-white">
-                    Checkout Cancelled
+                    {IS_LOCAL_DEPLOYMENT
+                        ? 'Billing unavailable'
+                        : 'Checkout Cancelled'}
                 </h1>
                 <p className="text-sm text-slate dark:text-white/70">
-                    You can resume your checkout anytime from the subscription
-                    page.
+                    {IS_LOCAL_DEPLOYMENT
+                        ? 'This local build does not expose subscription checkout.'
+                        : 'You can resume your checkout anytime from the subscription page.'}
                 </p>
                 <p className="text-xs text-slate/70 dark:text-white/50">
-                    Redirecting to subscription settings...
+                    {IS_LOCAL_DEPLOYMENT
+                        ? 'Redirecting to usage settings...'
+                        : 'Redirecting to subscription settings...'}
                 </p>
             </div>
         </div>

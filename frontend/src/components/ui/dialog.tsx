@@ -48,26 +48,48 @@ function DialogContent({
     className,
     children,
     showCloseButton = true,
+    hideDialogOverlay = false,
     overlayClassName,
+    accessibleTitle,
+    accessibleDescription,
     ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
     showCloseButton?: boolean
     hideDialogOverlay?: boolean
     overlayClassName?: string
+    accessibleTitle?: React.ReactNode
+    accessibleDescription?: React.ReactNode
 }) {
+    const contentProps = {
+        ...props,
+        'aria-describedby':
+            accessibleDescription == null &&
+            props['aria-describedby'] === undefined
+                ? undefined
+                : props['aria-describedby']
+    }
+
     return (
         <DialogPortal data-slot="dialog-portal">
-            {!props.hideDialogOverlay && (
-                <DialogOverlay className={overlayClassName} />
-            )}
+            {!hideDialogOverlay && <DialogOverlay className={overlayClassName} />}
             <DialogPrimitive.Content
                 data-slot="dialog-content"
                 className={cn(
                     'bg-white dark:bg-charcoal text-black dark:text-white data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border border-charcoal/30 dark:border-white/30 p-6 shadow-btn duration-200 sm:max-w-lg',
                     className
                 )}
-                {...props}
+                {...contentProps}
             >
+                {accessibleTitle != null && (
+                    <DialogPrimitive.Title className="sr-only">
+                        {accessibleTitle}
+                    </DialogPrimitive.Title>
+                )}
+                {accessibleDescription != null && (
+                    <DialogPrimitive.Description className="sr-only">
+                        {accessibleDescription}
+                    </DialogPrimitive.Description>
+                )}
                 {children}
                 {showCloseButton && (
                     <DialogPrimitive.Close

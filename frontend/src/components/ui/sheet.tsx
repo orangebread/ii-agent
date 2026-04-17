@@ -45,10 +45,23 @@ function SheetContent({
     className,
     children,
     side = 'right',
+    accessibleTitle,
+    accessibleDescription,
     ...props
 }: React.ComponentProps<typeof SheetPrimitive.Content> & {
     side?: 'top' | 'right' | 'bottom' | 'left'
+    accessibleTitle?: React.ReactNode
+    accessibleDescription?: React.ReactNode
 }) {
+    const contentProps = {
+        ...props,
+        'aria-describedby':
+            accessibleDescription == null &&
+            props['aria-describedby'] === undefined
+                ? undefined
+                : props['aria-describedby']
+    }
+
     return (
         <SheetPortal>
             <SheetOverlay />
@@ -66,8 +79,18 @@ function SheetContent({
                         'data-[state=closed]:slide-out-to-bottom data-[state=open]:slide-in-from-bottom inset-x-0 bottom-0 h-auto',
                     className
                 )}
-                {...props}
+                {...contentProps}
             >
+                {accessibleTitle != null && (
+                    <SheetPrimitive.Title className="sr-only">
+                        {accessibleTitle}
+                    </SheetPrimitive.Title>
+                )}
+                {accessibleDescription != null && (
+                    <SheetPrimitive.Description className="sr-only">
+                        {accessibleDescription}
+                    </SheetPrimitive.Description>
+                )}
                 {children}
             </SheetPrimitive.Content>
         </SheetPortal>

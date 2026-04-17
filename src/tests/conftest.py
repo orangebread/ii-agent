@@ -230,6 +230,7 @@ def settings_factory(tmp_path):
             "session_secret_key": "session-secret",
             "ii_auth_base": "https://auth.ii.inc",
         },
+        "ii_frontend_url": "http://localhost:1420",
         "credits": {
             "default_user_credits": 10.0,
             "default_subscription_plan": "free",
@@ -252,6 +253,7 @@ def settings_factory(tmp_path):
         "llm_configs": {},
         "sandbox": {"time_til_clean_up": 3600},
         "mcp": {
+            "anthropic_oauth_authorize_url": "https://claude.ai/oauth/authorize",
             "anthropic_oauth_token_url": "https://mcp.local/oauth/token",
             "anthropic_oauth_client_id": "client-id",
             "anthropic_oauth_redirect_uri": "https://mcp.local/callback",

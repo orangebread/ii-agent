@@ -154,6 +154,27 @@ class ClaudeCodeConfigConfigure(BaseModel):
     authorization_code: str = Field(..., description="OAuth authorization code from Claude")
 
 
+class ClaudeCodeOAuthStartRequest(BaseModel):
+    """Request model for starting the Claude Code OAuth flow."""
+
+    redirect_uri: str = Field(..., description="Frontend callback URI for popup completion")
+
+
+class ClaudeCodeOAuthStartResponse(BaseModel):
+    """Response returned when starting the Claude Code OAuth flow."""
+
+    login_id: str
+    authorization_url: str
+
+
+class ClaudeCodeOAuthCompleteRequest(BaseModel):
+    """Request model for completing the Claude Code OAuth flow."""
+
+    login_id: str
+    code: str
+    state: str
+
+
 class CodexOpenAIDeviceStartRequest(BaseModel):
     """Request model for starting the OpenAI Codex device-code flow."""
 

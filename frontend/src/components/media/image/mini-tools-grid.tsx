@@ -105,6 +105,7 @@ const MiniToolsGrid = ({ open, disabled, onSelect, onClose }: Props) => {
                 hideDialogOverlay
                 showCloseButton={false}
                 className="w-full md:w-[calc(100vw-178px)] overflow-auto !translate-x-0 group-data-[collapsible=icon]:w-[calc(100vw-345px)] h-full dark:bg-charcoal border-none shadow-none !max-w-none"
+                accessibleTitle={t('media.miniTools.chooseTool')}
                 style={
                     isMobile
                         ? {

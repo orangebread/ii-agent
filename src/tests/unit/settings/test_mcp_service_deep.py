@@ -29,6 +29,7 @@ from ii_agent.settings.mcp.schemas import MCPServersConfig, MCPSettingCreate, MC
 from ii_agent.settings.mcp.service import (
     MCPSettingService,
     _extract_codex_auth_json,
+    _verify_claude_code_oauth_login_id,
     _to_mcp_setting_info,
 )
 
@@ -117,10 +118,14 @@ def _make_service(
     elif config is None:
         config = SimpleNamespace(
             mcp=SimpleNamespace(
+                anthropic_oauth_authorize_url="https://claude.ai/oauth/authorize",
                 anthropic_oauth_token_url="https://oauth.example.com/token",
                 anthropic_oauth_client_id="client-id",
                 anthropic_oauth_redirect_uri="https://example.com/callback",
-            )
+            ),
+            ii_frontend_url="http://localhost:1420",
+            oauth=SimpleNamespace(session_secret_key="session-secret"),
+            environment="local",
         )
     return MCPSettingService(repo=repo or FakeMCPRepo(), config=config)
 
@@ -675,6 +680,62 @@ async def test_configure_claude_code_updates_existing():
 
     # Should update existing, not create new
     assert len(repo.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_start_claude_code_oauth_builds_authorization_url():
+    """Backend owns PKCE and returns a popup-ready authorization URL."""
+    svc = _make_service()
+
+    result = await svc.start_claude_code_oauth(
+        user_id="u1",
+        redirect_uri="http://localhost:1420/claude-code-callback",
+    )
+
+    assert result.login_id
+    assert result.authorization_url.startswith("https://claude.ai/oauth/authorize?")
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A1420%2Fclaude-code-callback" in (
+        result.authorization_url
+    )
+    assert "code_challenge=" in result.authorization_url
+
+
+@pytest.mark.asyncio
+async def test_complete_claude_code_oauth_uses_staged_redirect_uri():
+    """Completion must reuse the exact redirect URI staged at OAuth start."""
+    repo = FakeMCPRepo()
+    svc = _make_service(repo=repo)
+    start = await svc.start_claude_code_oauth(
+        user_id="u1",
+        redirect_uri="http://localhost:1420/claude-code-callback",
+    )
+    staged = _verify_claude_code_oauth_login_id(
+        svc._config,
+        start.login_id,
+        expected_user_id="u1",
+    )
+
+    with patch(
+        "ii_agent.settings.mcp.service._exchange_code_for_tokens",
+        new=AsyncMock(
+            return_value={
+                "access_token": "access-123",
+                "refresh_token": "refresh-456",
+                "expires_in": 3600,
+            }
+        ),
+    ) as exchange_mock:
+        await svc.complete_claude_code_oauth(
+            db=None,
+            user_id="u1",
+            login_id=start.login_id,
+            code="auth-code",
+            state=staged["verifier"],
+        )
+
+    assert exchange_mock.await_args.kwargs["redirect_uri"] == (
+        "http://localhost:1420/claude-code-callback"
+    )
 
 
 # ---------------------------------------------------------------------------

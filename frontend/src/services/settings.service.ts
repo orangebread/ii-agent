@@ -1,5 +1,6 @@
 import axiosInstance from '@/lib/axios'
 import {
+    ClaudeCodeOAuthStartResponse,
     CodexOpenAIDevicePollResponse,
     CodexOpenAIDeviceStartResponse,
     GetAvailableModelsResponse,
@@ -134,6 +135,28 @@ class SettingsService {
     }): Promise<IMcpSettings> {
         const response = await axiosInstance.post<IMcpSettings>(
             '/v1/user-settings/mcp/claude-code',
+            payload
+        )
+        return response.data
+    }
+
+    async startClaudeCodeOAuth(payload: {
+        redirect_uri: string
+    }): Promise<ClaudeCodeOAuthStartResponse> {
+        const response = await axiosInstance.post<ClaudeCodeOAuthStartResponse>(
+            '/v1/user-settings/mcp/claude-code/oauth/start',
+            payload
+        )
+        return response.data
+    }
+
+    async completeClaudeCodeOAuth(payload: {
+        login_id: string
+        code: string
+        state: string
+    }): Promise<IMcpSettings> {
+        const response = await axiosInstance.post<IMcpSettings>(
+            '/v1/user-settings/mcp/claude-code/oauth/complete',
             payload
         )
         return response.data

@@ -15,6 +15,7 @@ import { selectSubscriptionPlan, selectUser } from '@/state/slice/user'
 import { useAppSelector } from '@/state/store'
 import { Icon } from './ui/icon'
 import { SUBSCRIPTION_PLANS } from '@/constants/subscription'
+import { SHOW_BILLING_UI } from '@/constants/features'
 
 interface UserProfileDropdownProps {
     avatarClassName?: string
@@ -59,7 +60,7 @@ const UserProfileDropdown = ({
                         </AvatarFallback>
                     </Avatar>
                     {children}
-                    {showPlan && (
+                    {showPlan && SHOW_BILLING_UI && (
                         <div className="flex flex-col">
                             <p>{`${user?.first_name} ${user?.last_name}`}</p>
                             <p className="text-xs text-black dark:text-grey-6 flex-1">
@@ -110,18 +111,32 @@ const UserProfileDropdown = ({
                 </DropdownMenuItem>
                 <DropdownMenuItem
                     className="flex items-center gap-[6px] p-0"
-                    onClick={() => navigate('/settings/subscription')}
+                    onClick={() => navigate('/settings/usage')}
                 >
-                    <Icon name="dollar-circle" className="size-4 fill-black" />
-                    <span>{t('settings.tabs.subscription')}</span>
+                    <Icon name="dashboard-2" className="size-4 fill-black" />
+                    <span>{t('settings.tabs.usage')}</span>
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                    className="flex items-center gap-[6px] p-0"
-                    onClick={() => navigate('/settings/account')}
-                >
-                    <Icon name="receipt" className="size-4 fill-black" />
-                    <span>{t('settings.account.paymentInvoices')}</span>
-                </DropdownMenuItem>
+                {SHOW_BILLING_UI && (
+                    <DropdownMenuItem
+                        className="flex items-center gap-[6px] p-0"
+                        onClick={() => navigate('/settings/subscription')}
+                    >
+                        <Icon
+                            name="dollar-circle"
+                            className="size-4 fill-black"
+                        />
+                        <span>{t('settings.tabs.subscription')}</span>
+                    </DropdownMenuItem>
+                )}
+                {SHOW_BILLING_UI && (
+                    <DropdownMenuItem
+                        className="flex items-center gap-[6px] p-0"
+                        onClick={() => navigate('/settings/account')}
+                    >
+                        <Icon name="receipt" className="size-4 fill-black" />
+                        <span>{t('settings.account.paymentInvoices')}</span>
+                    </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator className="my-3" />
                 <DropdownMenuItem
                     className="flex items-center gap-[6px] p-0"
