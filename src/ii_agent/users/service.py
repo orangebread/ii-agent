@@ -237,6 +237,20 @@ class UserService:
         await self._user_repo.set_language(db, user, language)
         await self._cache.evict(KEY_PATTERN.format(user_id=str(user.id)))
 
+    async def set_default_mcp_setting_id(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        default_mcp_setting_id: uuid.UUID | None,
+    ) -> None:
+        """Persist the user's default MCP runtime selection."""
+        user = await self._user_repo.get_by_id(db, user_id)
+        if user is None:
+            raise ValueError(f"User not found: {user_id}")
+        await self._user_repo.set_default_mcp_setting_id(db, user, default_mcp_setting_id)
+        await self._cache.evict(KEY_PATTERN.format(user_id=str(user.id)))
+
     async def delete_user(self, db: AsyncSession, user: User) -> None:
         """Soft-delete a user account by deactivating it."""
         await self._user_repo.set_active(db, user, is_active=False)

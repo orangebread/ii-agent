@@ -1,3 +1,4 @@
+import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -5,7 +6,7 @@ import pytest
 
 from ii_agent.settings.mcp.exceptions import MCPOAuthError
 from ii_agent.settings.mcp.schemas import MCPServersConfig
-from ii_agent.settings.mcp.service import MCPSettingService, _extract_codex_auth_json
+from ii_agent.settings.mcp.service import MCPSettingService
 
 
 class FakeMCPRepo:
@@ -39,8 +40,34 @@ class FakeMCPRepo:
         return None
 
 
+class FakeProviderConnectionService:
+    def __init__(self):
+        self.connections = {}
+
+    async def upsert_connection(self, db, **kwargs):
+        connection_id = kwargs.get("connection_id") or str(uuid.uuid4())
+        row = SimpleNamespace(
+            id=connection_id,
+            encrypted_credentials_json="encrypted",
+            connection_metadata=kwargs.get("connection_metadata") or {},
+        )
+        self.connections[connection_id] = {
+            "row": row,
+            "credentials": kwargs.get("credentials") or {},
+        }
+        return row
+
+    async def get_connection_model(self, db, *, connection_id, user_id):
+        stored = self.connections.get(str(connection_id))
+        return stored["row"] if stored else None
+
+    def get_credentials_dict(self, connection):
+        stored = self.connections.get(str(connection.id))
+        return stored["credentials"] if stored else {}
+
+
 @pytest.mark.asyncio
-async def test_create_mcp_settings_deactivates_previous_active(settings_factory):
+async def test_create_mcp_settings_leaves_existing_active_settings_untouched(settings_factory):
     active_setting = SimpleNamespace(is_active=True, updated_at=None)
     repo = FakeMCPRepo()
     repo.active = [active_setting]
@@ -56,7 +83,7 @@ async def test_create_mcp_settings_deactivates_previous_active(settings_factory)
         ),
     )
 
-    assert active_setting.is_active is False
+    assert active_setting.is_active is True
     assert len(repo.created) == 1
     assert result.is_active is True
 
@@ -188,7 +215,12 @@ async def test_poll_codex_openai_device_oauth_returns_pending(settings_factory):
 @pytest.mark.asyncio
 async def test_poll_codex_openai_device_oauth_persists_codex_setting(settings_factory):
     repo = FakeMCPRepo()
-    service = MCPSettingService(repo=repo, config=settings_factory())
+    provider_connection_svc = FakeProviderConnectionService()
+    service = MCPSettingService(
+        repo=repo,
+        config=settings_factory(),
+        provider_connection_service=provider_connection_svc,
+    )
 
     with patch(
         "ii_agent.settings.mcp.service._request_openai_device_code",
@@ -238,6 +270,7 @@ async def test_poll_codex_openai_device_oauth_persists_codex_setting(settings_fa
     assert result.status == "completed"
     assert len(repo.created) == 1
     stored = repo.created[0]
-    auth_json = _extract_codex_auth_json(stored.mcp_metadata)
+    connection_id = str(stored.mcp_metadata["provider_connection_id"])
+    auth_json = provider_connection_svc.connections[connection_id]["credentials"]
     assert auth_json["tokens"]["refresh_token"] == "refresh-123"
     assert stored.mcp_metadata["auth_mode"] == "openai_oauth"

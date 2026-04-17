@@ -24,6 +24,7 @@ class SessionUpdate(BaseModel):
     status: Optional[SessionState] = None
     settings: Optional[Dict[str, Any]] = None
     is_public: Optional[bool] = None
+    mcp_setting_id: Optional[UUID] = None
 
 
 class SessionInfo(BaseModel):
@@ -49,6 +50,7 @@ class SessionInfo(BaseModel):
     app_kind: AppKind = AppKind.AGENT
     title_pending: bool = False
     model_setting_id: Optional[UUID] = None
+    mcp_setting_id: Optional[UUID] = None
     session_metadata: Optional[Dict[str, Any]] = None
 
 

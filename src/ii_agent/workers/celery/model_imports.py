@@ -34,6 +34,7 @@ MODEL_MODULES: tuple[str, ...] = (
     "ii_agent.sessions.wishlist.models",
     "ii_agent.sessions.pin.models",
     "ii_agent.settings.llm.models",
+    "ii_agent.settings.provider_connections.models",
     "ii_agent.settings.mcp.models",
     "ii_agent.agents.sandboxes.models",
 )

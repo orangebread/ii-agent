@@ -28,6 +28,10 @@ class CodexMetadata(MCPMetadata):
         default=None,
         description="Encrypted Codex authentication JSON stored server-side",
     )
+    provider_connection_id: Optional[UUID] = Field(
+        default=None,
+        description="Stored provider connection backing this runtime",
+    )
     has_auth: bool = Field(default=False, description="Whether Codex auth is configured")
     auth_mode: Optional[str] = Field(
         default=None,
@@ -61,10 +65,15 @@ class ClaudeCodeMetadata(MCPMetadata):
     """Metadata specific to Claude Code MCP tool."""
 
     tool_type: str = Field(default="claude_code", description="Tool type is always 'claude_code'")
-    auth_json: Dict[str, Any] = Field(
-        ...,
+    auth_json: Optional[Dict[str, Any]] = Field(
+        default=None,
         description="Claude Code authentication JSON (access_token, refresh_token, expires_at)",
     )
+    provider_connection_id: Optional[UUID] = Field(
+        default=None,
+        description="Stored provider connection backing this runtime",
+    )
+    has_auth: bool = Field(default=False, description="Whether Claude Code auth is configured")
     store_path: str = Field(
         default="~/.claude", description="Path where Claude Code stores its data"
     )
@@ -206,6 +215,21 @@ class MCPSettingUpdate(BaseModel):
     mcp_config: Optional[MCPServersConfig] = Field(None, description="MCP configuration object")
     metadata: Optional[MCPMetadataType] = Field(None, description="Additional metadata")
     is_active: Optional[bool] = Field(None, description="Whether the MCP setting is active")
+
+
+class MCPDefaultSelectionUpdate(BaseModel):
+    """Request model for updating the user's default MCP runtime."""
+
+    setting_id: Optional[UUID] = Field(
+        default=None,
+        description="MCP setting ID to use as default, or null to clear the default",
+    )
+
+
+class MCPDefaultSelectionInfo(BaseModel):
+    """Response model for the user's default MCP runtime selection."""
+
+    default_mcp_setting_id: Optional[UUID] = None
 
 
 class MCPSettingInfo(BaseModel):

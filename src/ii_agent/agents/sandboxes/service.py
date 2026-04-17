@@ -712,19 +712,39 @@ class SandboxService:
         """Register user's custom + composio MCP servers with the sandbox."""
         from ii_agent.settings.mcp.service import MCPSettingService
         from ii_agent.settings.mcp.repository import MCPSettingRepository
-        from ii_agent.settings.mcp.schemas import CodexMetadata, ClaudeCodeMetadata
+        from ii_agent.settings.mcp.schemas import MCPSettingList
+        from ii_agent.settings.provider_connections.repository import ProviderConnectionRepository
+        from ii_agent.settings.provider_connections.service import ProviderConnectionService
+        from ii_agent.users.repository import UserRepository
         from ii_server.mcp.client import MCPClient
 
-        mcp_svc = MCPSettingService(repo=MCPSettingRepository(), config=self._config)
+        provider_connection_svc = ProviderConnectionService(repo=ProviderConnectionRepository())
+        mcp_svc = MCPSettingService(
+            repo=MCPSettingRepository(),
+            config=self._config,
+            user_repo=UserRepository(),
+            session_repo=self._session_repo,
+            provider_connection_service=provider_connection_svc,
+        )
         mcp_settings = await mcp_svc.list_mcp_settings(
             db,
             user_id=user_id,
             only_active=True,
-            include_secrets=True,
         )
-
+        selected_runtime = await mcp_svc.resolve_effective_runtime_setting(
+            db,
+            user_id=user_id,
+            session_id=uuid.UUID(str(sandbox.session_id)),
+        )
+        non_provider_settings = [
+            setting
+            for setting in mcp_settings.settings
+            if getattr(setting.metadata, "tool_type", None) not in {"codex", "claude_code"}
+        ]
         combined_config = (
-            mcp_settings.get_combined_active_config() if mcp_settings.settings else None
+            MCPSettingList(settings=non_provider_settings).get_combined_active_config()
+            if non_provider_settings
+            else None
         )
         config_dict = combined_config.model_dump(exclude_none=True) if combined_config else {}
 
@@ -734,23 +754,38 @@ class SandboxService:
         merged_mcp_servers: dict = {}
         if config_dict.get("mcpServers"):
             merged_mcp_servers.update(config_dict["mcpServers"])
+        selected_tool_type = (
+            selected_runtime.mcp_metadata.get("tool_type")
+            if selected_runtime and isinstance(selected_runtime.mcp_metadata, dict)
+            else None
+        )
+        if (
+            selected_runtime
+            and selected_tool_type == "claude_code"
+            and isinstance(selected_runtime.mcp_config, dict)
+            and selected_runtime.mcp_config.get("mcpServers")
+        ):
+            merged_mcp_servers.update(selected_runtime.mcp_config["mcpServers"])
         if composio_mcp_servers:
             merged_mcp_servers.update(composio_mcp_servers)
 
         async with MCPClient(sandbox_url) as client:
-            if combined_config:
-                is_codex = any(isinstance(m, CodexMetadata) for m in combined_config.metadatas)
-                for md in combined_config.metadatas:
-                    if isinstance(md, CodexMetadata):
-                        store_path = f"{self._config.sandbox.user}/.codex/auth.json"
-                        await sandbox.write_file(store_path, json.dumps(md.auth_json))
-                    if isinstance(md, ClaudeCodeMetadata):
-                        store_path = f"{self._config.sandbox.user}/.claude/.credentials.json"
-                        await sandbox.write_file(store_path, json.dumps(md.auth_json))
-
-                if is_codex:
-                    logger.info("Codex metadata found, ensuring Codex setup in sandbox")
+            if selected_runtime and selected_runtime.provider_connection_id:
+                connection = await provider_connection_svc.get_connection_model(
+                    db,
+                    connection_id=selected_runtime.provider_connection_id,
+                    user_id=user_id,
+                )
+                credentials = (
+                    provider_connection_svc.get_credentials_dict(connection) if connection else {}
+                )
+                if selected_tool_type == "codex" and credentials:
+                    store_path = f"{self._config.sandbox.user}/.codex/auth.json"
+                    await sandbox.write_file(store_path, json.dumps(credentials))
                     await client.register_codex()
+                elif selected_tool_type == "claude_code" and credentials:
+                    store_path = f"{self._config.sandbox.user}/.claude/.credentials.json"
+                    await sandbox.write_file(store_path, json.dumps(credentials))
 
             if merged_mcp_servers:
                 logger.info(f"Registering {len(merged_mcp_servers)} MCP servers for user {user_id}")

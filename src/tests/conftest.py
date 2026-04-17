@@ -251,7 +251,7 @@ def settings_factory(tmp_path):
             "stripe_portal_return_url": "https://app.local/billing",
         },
         "llm_configs": {},
-        "sandbox": {"time_til_clean_up": 3600},
+        "sandbox": {"time_til_clean_up": 3600, "user": "/home/user"},
         "mcp": {
             "anthropic_oauth_authorize_url": "https://claude.ai/oauth/authorize",
             "anthropic_oauth_token_url": "https://mcp.local/oauth/token",

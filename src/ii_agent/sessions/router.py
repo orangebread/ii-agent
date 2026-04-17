@@ -11,6 +11,7 @@ from ii_agent.core.exceptions import InternalError
 from ii_agent.sessions.dependencies import RunTaskServiceDep
 from ii_agent.chat.api.dependencies import ChatMessageRepositoryDep
 from ii_agent.files.dependencies import FileServiceDep
+from ii_agent.settings.mcp.dependencies import MCPSettingServiceDep
 from ii_agent.sessions.dependencies import SessionForkServiceDep, SessionServiceDep
 from ii_agent.sessions.exceptions import SessionNotFoundError
 from ii_agent.sessions.schemas import (
@@ -283,6 +284,7 @@ async def update_session(
     db: DBSession,
     current_user: CurrentUser,
     session_service: SessionServiceDep,
+    mcp_service: MCPSettingServiceDep,
 ) -> SessionInfo:
     """Update session metadata (name, status, etc.)."""
     session_data = await session_service.get_session_details(db, session_id, current_user.id)
@@ -292,6 +294,19 @@ async def update_session(
 
     if payload.name is not None:
         await session_service.update_session_name(db, session_id, payload.name)
+    if "mcp_setting_id" in payload.model_fields_set:
+        if payload.mcp_setting_id is not None:
+            await mcp_service.assert_runtime_setting_selectable(
+                db,
+                user_id=current_user.id,
+                setting_id=payload.mcp_setting_id,
+                selection_kind="session",
+            )
+        await session_service.update_session_fields(
+            db,
+            session_id,
+            mcp_setting_id=payload.mcp_setting_id,
+        )
 
     updated_session = await session_service.get_session_details(db, session_id, current_user.id)
 

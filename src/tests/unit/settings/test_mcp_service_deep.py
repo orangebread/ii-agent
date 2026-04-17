@@ -28,7 +28,6 @@ from ii_agent.settings.mcp.exceptions import MCPOAuthError, MCPSettingNotFoundEr
 from ii_agent.settings.mcp.schemas import MCPServersConfig, MCPSettingCreate, MCPSettingUpdate
 from ii_agent.settings.mcp.service import (
     MCPSettingService,
-    _extract_codex_auth_json,
     _verify_claude_code_oauth_login_id,
     _to_mcp_setting_info,
 )
@@ -47,10 +46,12 @@ def _make_mcp_setting(
     is_active: bool = True,
     mcp_config: dict | None = None,
     mcp_metadata: dict | None = None,
+    provider_connection_id: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=setting_id or str(uuid.uuid4()),
         user_id=user_id,
+        provider_connection_id=provider_connection_id,
         mcp_config=mcp_config or {"mcpServers": {}},
         mcp_metadata=mcp_metadata,
         is_active=is_active,
@@ -65,8 +66,8 @@ class FakeMCPRepo:
         self.by_tool_type: dict = {}  # tool_type -> setting
 
     async def get_by_id_and_user(self, db, setting_id, user_id):
-        s = self.items.get(setting_id)
-        if s and s.user_id == user_id:
+        s = self.items.get(str(setting_id))
+        if s and str(s.user_id) == str(user_id):
             return s
         return None
 
@@ -86,6 +87,17 @@ class FakeMCPRepo:
 
     async def list_active_by_user(self, db, user_id):
         return await self.list_by_user(db, user_id, only_active=True)
+
+    async def list_runtime_settings_by_user(self, db, user_id, *, only_active=False):
+        result = [
+            s
+            for s in self.items.values()
+            if str(s.user_id) == str(user_id)
+            and (s.mcp_metadata or {}).get("tool_type") in {"codex", "claude_code"}
+        ]
+        if only_active:
+            result = [s for s in result if s.is_active]
+        return result
 
     async def create(self, db, setting):
         self.items[setting.id] = setting
@@ -108,10 +120,90 @@ class FakeMCPRepo:
                 del self.by_tool_type[k]
 
 
+class FakeProviderConnectionService:
+    def __init__(self):
+        self.connections: dict[str, dict] = {}
+        self.counter = 0
+
+    async def upsert_connection(self, db, **kwargs):
+        existing_id = None
+        for connection_id, stored in self.connections.items():
+            row = stored["row"]
+            if (
+                row.user_id == kwargs["user_id"]
+                and row.provider == kwargs["provider"]
+                and row.product == kwargs["product"]
+            ):
+                existing_id = connection_id
+                break
+
+        if existing_id is None:
+            self.counter += 1
+            existing_id = str(uuid.uuid4())
+
+        row = SimpleNamespace(
+            id=existing_id,
+            user_id=kwargs["user_id"],
+            provider=kwargs["provider"],
+            product=kwargs["product"],
+            encrypted_credentials_json="encrypted",
+            connection_metadata=kwargs.get("connection_metadata") or {},
+        )
+        self.connections[existing_id] = {
+            "row": row,
+            "credentials": kwargs.get("credentials") or {},
+        }
+        return row
+
+    async def get_connection_model(self, db, *, connection_id, user_id):
+        stored = self.connections.get(str(connection_id))
+        if not stored:
+            return None
+        row = stored["row"]
+        return row if str(row.user_id) == str(user_id) else None
+
+    def get_credentials_dict(self, connection):
+        stored = self.connections.get(str(connection.id))
+        return stored["credentials"] if stored else {}
+
+
+class FakeUserRepo:
+    def __init__(self, user=None):
+        self.user = user or SimpleNamespace(id="u1", default_mcp_setting_id=None)
+
+    async def get_by_id(self, db, user_id):
+        if str(self.user.id) != str(user_id):
+            return None
+        return self.user
+
+    async def set_default_mcp_setting_id(self, db, user, setting_id):
+        user.default_mcp_setting_id = setting_id
+
+
+class FakeSessionRepo:
+    def __init__(self, sessions=None):
+        self.sessions = {str(session.id): session for session in (sessions or [])}
+        self.clear_calls = []
+
+    async def get_by_id(self, db, session_id):
+        return self.sessions.get(str(session_id))
+
+    async def clear_mcp_setting_references(self, db, *, user_id, setting_id):
+        self.clear_calls.append((str(user_id), str(setting_id)))
+        for session in self.sessions.values():
+            if str(session.user_id) == str(user_id) and str(session.mcp_setting_id) == str(
+                setting_id
+            ):
+                session.mcp_setting_id = None
+
+
 def _make_service(
     repo: FakeMCPRepo | None = None,
     settings_factory=None,
     config=None,
+    provider_connection_service: FakeProviderConnectionService | None = None,
+    user_repo: FakeUserRepo | None = None,
+    session_repo: FakeSessionRepo | None = None,
 ) -> MCPSettingService:
     if config is None and settings_factory is not None:
         config = settings_factory()
@@ -127,7 +219,13 @@ def _make_service(
             oauth=SimpleNamespace(session_secret_key="session-secret"),
             environment="local",
         )
-    return MCPSettingService(repo=repo or FakeMCPRepo(), config=config)
+    return MCPSettingService(
+        repo=repo or FakeMCPRepo(),
+        config=config,
+        user_repo=user_repo,
+        session_repo=session_repo,
+        provider_connection_service=provider_connection_service or FakeProviderConnectionService(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +234,8 @@ def _make_service(
 
 
 @pytest.mark.asyncio
-async def test_create_mcp_settings_deactivates_existing_active():
-    """All active settings for the user are deactivated before creating new one."""
+async def test_create_mcp_settings_keeps_existing_active():
+    """Creating a setting no longer deactivates unrelated active settings."""
     active1 = _make_mcp_setting(user_id="u1", is_active=True)
     active2 = _make_mcp_setting(user_id="u1", is_active=True)
     repo = FakeMCPRepo()
@@ -155,8 +253,8 @@ async def test_create_mcp_settings_deactivates_existing_active():
         ),
     )
 
-    assert active1.is_active is False
-    assert active2.is_active is False
+    assert active1.is_active is True
+    assert active2.is_active is True
     assert result.is_active is True
 
 
@@ -382,6 +480,28 @@ async def test_delete_mcp_settings_not_found_returns_false():
     assert result is False
 
 
+@pytest.mark.asyncio
+async def test_delete_mcp_settings_clears_default_and_session_references():
+    """Deleting a selected runtime clears user/session selectors before removal."""
+    setting = _make_mcp_setting(
+        user_id="u1",
+        mcp_metadata={"tool_type": "codex", "provider_connection_id": str(uuid.uuid4())},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    user_repo = FakeUserRepo(user=SimpleNamespace(id="u1", default_mcp_setting_id=setting.id))
+    session = SimpleNamespace(id=str(uuid.uuid4()), user_id="u1", mcp_setting_id=setting.id)
+    session_repo = FakeSessionRepo(sessions=[session])
+    svc = _make_service(repo=repo, user_repo=user_repo, session_repo=session_repo)
+
+    result = await svc.delete_mcp_settings(db=None, setting_id=setting.id, user_id="u1")
+
+    assert result is True
+    assert user_repo.user.default_mcp_setting_id is None
+    assert session.mcp_setting_id is None
+    assert setting.id not in repo.items
+
+
 # ---------------------------------------------------------------------------
 # Tests – get_codex_setting / get_claude_code_setting
 # ---------------------------------------------------------------------------
@@ -454,7 +574,8 @@ async def test_get_claude_code_setting_returns_none_when_missing():
 async def test_configure_codex_with_apikey_only():
     """apikey provided without auth_json creates auth_json from apikey."""
     repo = FakeMCPRepo()
-    svc = _make_service(repo=repo)
+    provider_connection_svc = FakeProviderConnectionService()
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
 
     result = await svc.configure_codex(
         db=None,
@@ -468,7 +589,10 @@ async def test_configure_codex_with_apikey_only():
 
     assert result is not None
     created = list(repo.items.values())[0]
-    assert _extract_codex_auth_json(created.mcp_metadata)["OPENAI_API_KEY"] == "sk-test-key"
+    connection_id = str(created.mcp_metadata["provider_connection_id"])
+    assert provider_connection_svc.connections[connection_id]["credentials"]["OPENAI_API_KEY"] == (
+        "sk-test-key"
+    )
     assert created.mcp_metadata["auth_mode"] == "api_key"
 
 
@@ -476,7 +600,8 @@ async def test_configure_codex_with_apikey_only():
 async def test_configure_codex_with_auth_json_and_apikey():
     """Both auth_json and apikey - apikey is added to auth_json."""
     repo = FakeMCPRepo()
-    svc = _make_service(repo=repo)
+    provider_connection_svc = FakeProviderConnectionService()
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
 
     result = await svc.configure_codex(
         db=None,
@@ -490,7 +615,8 @@ async def test_configure_codex_with_auth_json_and_apikey():
 
     assert result is not None
     created = list(repo.items.values())[0]
-    auth_json = _extract_codex_auth_json(created.mcp_metadata)
+    connection_id = str(created.mcp_metadata["provider_connection_id"])
+    auth_json = provider_connection_svc.connections[connection_id]["credentials"]
     assert auth_json["OPENAI_API_KEY"] == "sk-merged"
     assert auth_json["OTHER_KEY"] == "other-value"
 
@@ -516,7 +642,7 @@ async def test_configure_codex_no_auth_raises():
 async def test_configure_codex_with_model_and_reasoning():
     """Model and reasoning_effort are appended to uvx args."""
     repo = FakeMCPRepo()
-    svc = _make_service(repo=repo)
+    svc = _make_service(repo=repo, provider_connection_service=FakeProviderConnectionService())
 
     await svc.configure_codex(
         db=None,
@@ -554,7 +680,8 @@ async def test_configure_codex_updates_existing():
     repo = FakeMCPRepo()
     repo.items[existing.id] = existing
     repo.by_tool_type["codex"] = existing
-    svc = _make_service(repo=repo)
+    provider_connection_svc = FakeProviderConnectionService()
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
 
     await svc.configure_codex(
         db=None,
@@ -580,11 +707,24 @@ async def test_configure_codex_preserves_existing_auth_when_only_updating_option
             "auth_json": {"OPENAI_API_KEY": "persist-me"},
             "store_path": "~/.codex",
         },
+        provider_connection_id=str(uuid.uuid4()),
     )
     repo = FakeMCPRepo()
     repo.items[existing.id] = existing
     repo.by_tool_type["codex"] = existing
-    svc = _make_service(repo=repo)
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[existing.provider_connection_id] = {
+        "row": SimpleNamespace(
+            id=existing.provider_connection_id,
+            user_id="u1",
+            provider="openai",
+            product="codex",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+        ),
+        "credentials": {"OPENAI_API_KEY": "persist-me"},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
 
     await svc.configure_codex(
         db=None,
@@ -596,7 +736,9 @@ async def test_configure_codex_preserves_existing_auth_when_only_updating_option
         search=True,
     )
 
-    auth_json = _extract_codex_auth_json(existing.mcp_metadata)
+    auth_json = provider_connection_svc.connections[str(existing.provider_connection_id)][
+        "credentials"
+    ]
     assert auth_json["OPENAI_API_KEY"] == "persist-me"
     assert existing.mcp_metadata["search"] is True
 
@@ -623,7 +765,7 @@ async def test_configure_claude_code_invalid_format_raises():
 async def test_configure_claude_code_token_exchange_success():
     """Valid authorization_code triggers token exchange and creates setting."""
     repo = FakeMCPRepo()
-    svc = _make_service(repo=repo)
+    svc = _make_service(repo=repo, provider_connection_service=FakeProviderConnectionService())
 
     token_response = {
         "access_token": "access-123",
@@ -660,7 +802,7 @@ async def test_configure_claude_code_updates_existing():
     repo = FakeMCPRepo()
     repo.items[existing.id] = existing
     repo.by_tool_type["claude_code"] = existing
-    svc = _make_service(repo=repo)
+    svc = _make_service(repo=repo, provider_connection_service=FakeProviderConnectionService())
 
     token_response = {
         "access_token": "new-access",
@@ -704,7 +846,7 @@ async def test_start_claude_code_oauth_builds_authorization_url():
 async def test_complete_claude_code_oauth_uses_staged_redirect_uri():
     """Completion must reuse the exact redirect URI staged at OAuth start."""
     repo = FakeMCPRepo()
-    svc = _make_service(repo=repo)
+    svc = _make_service(repo=repo, provider_connection_service=FakeProviderConnectionService())
     start = await svc.start_claude_code_oauth(
         user_id="u1",
         redirect_uri="http://localhost:1420/claude-code-callback",
@@ -736,6 +878,59 @@ async def test_complete_claude_code_oauth_uses_staged_redirect_uri():
     assert exchange_mock.await_args.kwargs["redirect_uri"] == (
         "http://localhost:1420/claude-code-callback"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tests – runtime selection validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_assert_runtime_setting_selectable_rejects_inactive_setting():
+    setting = _make_mcp_setting(
+        user_id="u1",
+        is_active=False,
+        provider_connection_id=str(uuid.uuid4()),
+        mcp_metadata={"tool_type": "codex", "provider_connection_id": str(uuid.uuid4())},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    svc = _make_service(
+        repo=repo,
+        provider_connection_service=FakeProviderConnectionService(),
+    )
+
+    with pytest.raises(MCPOAuthError, match="active"):
+        await svc.assert_runtime_setting_selectable(
+            db=None,
+            user_id="u1",
+            setting_id=uuid.UUID(setting.id),
+            selection_kind="session",
+        )
+
+
+@pytest.mark.asyncio
+async def test_assert_runtime_setting_selectable_rejects_missing_provider_credentials():
+    connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=connection_id,
+        mcp_metadata={"tool_type": "codex", "provider_connection_id": connection_id},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    svc = _make_service(
+        repo=repo,
+        provider_connection_service=FakeProviderConnectionService(),
+    )
+
+    with pytest.raises(MCPOAuthError, match="missing provider credentials"):
+        await svc.assert_runtime_setting_selectable(
+            db=None,
+            user_id="u1",
+            setting_id=uuid.UUID(setting.id),
+            selection_kind="session",
+        )
 
 
 # ---------------------------------------------------------------------------

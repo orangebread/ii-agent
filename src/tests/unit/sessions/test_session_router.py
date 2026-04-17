@@ -14,13 +14,15 @@ from ii_agent.auth.dependencies import get_current_user
 from ii_agent.core.dependencies import _db_session_dependency
 from ii_agent.core.exceptions import IIAgentError
 from ii_agent.core.middleware import ii_agent_error_handler
+from ii_agent.settings.mcp.dependencies import _get_mcp_setting_service as get_mcp_setting_service
+from ii_agent.settings.mcp.exceptions import MCPSettingNotFoundError
 from ii_agent.sessions.dependencies import _get_run_task_service
 from ii_agent.files.dependencies import _get_file_service as get_file_service
 from ii_agent.sessions.dependencies import (
     _get_session_fork_service as get_session_fork_service,
     _get_session_service as get_session_service,
 )
-from ii_agent.sessions.router import router
+from ii_agent.sessions.router import public_router, router
 from ii_agent.sessions.schemas import SessionEventDetail, SessionInfo
 
 pytestmark = pytest.mark.unit
@@ -81,6 +83,7 @@ def _make_session_service(
     svc.set_session_public = AsyncMock(return_value=set_public_result)
     svc.soft_delete_session = AsyncMock(return_value=None)
     svc.update_session_name = AsyncMock(return_value=None)
+    svc.update_session_fields = AsyncMock(return_value=None)
     svc.update_session_plan = AsyncMock(return_value=None)
 
     # second call for get_session_details in update_session
@@ -118,11 +121,18 @@ def _make_fork_service(*, fork_result: dict | None = None) -> MagicMock:
     return svc
 
 
+def _make_mcp_service() -> MagicMock:
+    svc = MagicMock()
+    svc.assert_runtime_setting_selectable = AsyncMock(return_value=None)
+    return svc
+
+
 def _build_app(
     session_service: MagicMock,
     run_task_service: MagicMock | None = None,
     file_service: MagicMock | None = None,
     fork_service: MagicMock | None = None,
+    mcp_service: MagicMock | None = None,
     user: SimpleNamespace | None = None,
 ) -> FastAPI:
     app = FastAPI()
@@ -133,6 +143,7 @@ def _build_app(
     _run_task_svc = run_task_service or _make_run_task_service()
     _file_svc = file_service or _make_file_service()
     _fork_svc = fork_service or _make_fork_service()
+    _mcp_svc = mcp_service or _make_mcp_service()
 
     app.dependency_overrides[get_current_user] = lambda: _user
     app.dependency_overrides[_db_session_dependency] = lambda: AsyncMock()
@@ -140,6 +151,7 @@ def _build_app(
     app.dependency_overrides[_get_run_task_service] = lambda: _run_task_svc
     app.dependency_overrides[get_file_service] = lambda: _file_svc
     app.dependency_overrides[get_session_fork_service] = lambda: _fork_svc
+    app.dependency_overrides[get_mcp_setting_service] = lambda: _mcp_svc
 
     return app
 
@@ -471,14 +483,14 @@ def test_get_public_session_no_auth():
 
     # Build app without CurrentUser override (public endpoint)
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(public_router)
     app.add_exception_handler(IIAgentError, ii_agent_error_handler)
     app.dependency_overrides[_db_session_dependency] = lambda: AsyncMock()
     app.dependency_overrides[get_session_service] = lambda: svc
     app.dependency_overrides[_get_run_task_service] = lambda: _make_run_task_service()
 
     client = TestClient(app)
-    resp = client.get(f"/sessions/{_SESSION_ID}/public")
+    resp = client.get(f"/sessions/{_SESSION_ID}")
 
     assert resp.status_code == 200
     data = resp.json()
@@ -490,14 +502,14 @@ def test_get_public_session_not_found():
     svc = _make_session_service(public_session_data=None)
 
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(public_router)
     app.add_exception_handler(IIAgentError, ii_agent_error_handler)
     app.dependency_overrides[_db_session_dependency] = lambda: AsyncMock()
     app.dependency_overrides[get_session_service] = lambda: svc
     app.dependency_overrides[_get_run_task_service] = lambda: _make_run_task_service()
 
     client = TestClient(app, raise_server_exceptions=False)
-    resp = client.get(f"/sessions/{_SESSION_ID}/public")
+    resp = client.get(f"/sessions/{_SESSION_ID}")
 
     assert resp.status_code == 404
 
@@ -515,14 +527,15 @@ def test_get_public_session_events_success():
     agent_svc = _make_run_task_service(last_task=SimpleNamespace(status="completed"))
 
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(public_router)
     app.add_exception_handler(IIAgentError, ii_agent_error_handler)
     app.dependency_overrides[_db_session_dependency] = lambda: AsyncMock()
     app.dependency_overrides[get_session_service] = lambda: svc
     app.dependency_overrides[_get_run_task_service] = lambda: agent_svc
+    app.dependency_overrides[get_file_service] = lambda: _make_file_service()
 
     client = TestClient(app)
-    resp = client.get(f"/sessions/{_SESSION_ID}/public/events")
+    resp = client.get(f"/sessions/{_SESSION_ID}/events")
 
     assert resp.status_code == 200
     data = resp.json()
@@ -623,6 +636,40 @@ def test_update_session_no_name_change():
     svc.update_session_name.assert_not_called()
 
 
+def test_update_session_validates_runtime_override_before_persisting():
+    """Arrange: MCP override provided; Act: PATCH; Assert: selection is validated first."""
+    session_data = _make_session_data()
+    updated = _make_session_data(mcp_setting_id=uuid.uuid4())
+    svc = _make_session_service(session_data=session_data, updated_session_data=updated)
+    mcp_svc = _make_mcp_service()
+    setting_id = str(uuid.uuid4())
+
+    app = _build_app(svc, mcp_service=mcp_svc)
+    client = TestClient(app)
+    resp = client.patch(f"/sessions/{_SESSION_ID}", json={"mcp_setting_id": setting_id})
+
+    assert resp.status_code == 200
+    mcp_svc.assert_runtime_setting_selectable.assert_awaited_once()
+    svc.update_session_fields.assert_called_once()
+    call_kwargs = svc.update_session_fields.call_args.kwargs
+    assert str(call_kwargs["mcp_setting_id"]) == setting_id
+
+
+def test_update_session_rejects_invalid_runtime_override():
+    """Arrange: invalid MCP override; Act: PATCH; Assert: no session update is persisted."""
+    session_data = _make_session_data()
+    svc = _make_session_service(session_data=session_data, updated_session_data=session_data)
+    mcp_svc = _make_mcp_service()
+    mcp_svc.assert_runtime_setting_selectable.side_effect = MCPSettingNotFoundError("missing")
+
+    app = _build_app(svc, mcp_service=mcp_svc)
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.patch(f"/sessions/{_SESSION_ID}", json={"mcp_setting_id": str(uuid.uuid4())})
+
+    assert resp.status_code == 404
+    svc.update_session_fields.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Tests – PATCH /sessions/{session_id}/plan
 # ---------------------------------------------------------------------------
@@ -640,7 +687,7 @@ def test_update_session_plan_success():
             "summary": "Phase 1 complete",
             "milestones": [
                 {
-                    "id": "m1",
+                    "id": str(uuid.uuid4()),
                     "content": "Setup done",
                     "status": "completed",
                 }

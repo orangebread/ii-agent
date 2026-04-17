@@ -522,5 +522,6 @@ class SessionService:
             api_version=api_version or session.api_version,
             title_pending=SessionTitleService.is_title_pending(session.session_metadata),
             model_setting_id=session.model_setting_id,
+            mcp_setting_id=session.mcp_setting_id,
             session_metadata=session.session_metadata,
         )

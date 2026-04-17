@@ -100,6 +100,16 @@ class UserRepository:
         user.language = language
         await db.flush()
 
+    async def set_default_mcp_setting_id(
+        self,
+        db: AsyncSession,
+        user: User,
+        default_mcp_setting_id: uuid.UUID | None,
+    ) -> None:
+        """Set or clear the user's default MCP runtime selection."""
+        user.default_mcp_setting_id = default_mcp_setting_id
+        await db.flush()
+
 
 class APIKeyRepository:
     """Data access layer for APIKey model."""

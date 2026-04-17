@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from ii_agent.sessions.models import Session
     from ii_agent.settings.llm.models import ModelSetting
     from ii_agent.settings.mcp.models import MCPSetting
+    from ii_agent.settings.provider_connections.models import ProviderConnection
     from ii_agent.files.models import FileAsset
     from ii_agent.sessions.wishlist.models import SessionWishlist
     from ii_agent.sessions.pin.models import SessionPin
@@ -61,6 +62,11 @@ class User(Base):
         TimestampColumn, nullable=True
     )
     language: Mapped[str] = mapped_column(String, default="en")
+    default_mcp_setting_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mcp_settings.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     # Relationships (using string references for forward declarations)
     sessions: Mapped[list["Session"]] = relationship(
@@ -70,7 +76,13 @@ class User(Base):
         "ModelSetting", back_populates="user", cascade="all, delete-orphan"
     )
     mcp_settings: Mapped[list["MCPSetting"]] = relationship(
-        "MCPSetting", back_populates="user", cascade="all, delete-orphan"
+        "MCPSetting",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="MCPSetting.user_id",
+    )
+    provider_connections: Mapped[list["ProviderConnection"]] = relationship(
+        "ProviderConnection", back_populates="user", cascade="all, delete-orphan"
     )
     file_assets: Mapped[list["FileAsset"]] = relationship(
         "FileAsset", back_populates="user", cascade="all, delete-orphan"

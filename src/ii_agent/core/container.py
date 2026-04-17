@@ -35,6 +35,7 @@ from ii_agent.files.repository import FileRepository
 from ii_agent.tasks.repository import RunTaskRepository, TaskLogRepository
 from ii_agent.settings.llm.repository import ModelSettingRepository
 from ii_agent.settings.mcp.repository import MCPSettingRepository
+from ii_agent.settings.provider_connections.repository import ProviderConnectionRepository
 from ii_agent.settings.skills.repository import SkillRepository
 from ii_agent.projects.repository import ProjectRepository
 from ii_agent.projects.deployments.repository import DeploymentsRepository
@@ -68,6 +69,7 @@ from ii_agent.files.service import FileService
 from ii_agent.tasks.service import RunTaskService
 from ii_agent.settings.llm.service import ModelSettingService
 from ii_agent.settings.mcp.service import MCPSettingService
+from ii_agent.settings.provider_connections.service import ProviderConnectionService
 from ii_agent.settings.skills.service import SkillService
 from ii_agent.projects.service import ProjectService
 from ii_agent.projects.deployments.service import DeploymentsService
@@ -133,6 +135,7 @@ class ApplicationContainer:
     file_service: FileService
     run_task_service: RunTaskService
     model_setting_service: ModelSettingService
+    provider_connection_service: ProviderConnectionService
     mcp_setting_service: MCPSettingService
     skill_service: SkillService
     project_service: ProjectService
@@ -202,6 +205,7 @@ class ApplicationContainer:
         task_log_repo = TaskLogRepository()
         model_setting_repo = ModelSettingRepository()
         mcp_setting_repo = MCPSettingRepository()
+        provider_connection_repo = ProviderConnectionRepository()
         skill_repo = SkillRepository()
         project_repo = ProjectRepository()
         deployments_repo = DeploymentsRepository()
@@ -224,7 +228,14 @@ class ApplicationContainer:
         run_task_svc = RunTaskService(
             task_repo=run_task_repo, log_repo=task_log_repo, cache=tasks_cache, config=cfg
         )
-        mcp_setting_svc = MCPSettingService(repo=mcp_setting_repo, config=cfg)
+        provider_connection_svc = ProviderConnectionService(repo=provider_connection_repo)
+        mcp_setting_svc = MCPSettingService(
+            repo=mcp_setting_repo,
+            config=cfg,
+            user_repo=user_repo,
+            session_repo=session_repo,
+            provider_connection_service=provider_connection_svc,
+        )
         skill_svc = SkillService(skill_repo=skill_repo, config=cfg)
         storybook_svc = StorybookService(repo=storybook_repo, config=cfg)
         storybook_version_svc = StorybookVersionService(
@@ -441,6 +452,7 @@ class ApplicationContainer:
             file_service=file_svc,
             run_task_service=run_task_svc,
             model_setting_service=model_setting_svc,
+            provider_connection_service=provider_connection_svc,
             mcp_setting_service=mcp_setting_svc,
             skill_service=skill_svc,
             project_service=project_svc,

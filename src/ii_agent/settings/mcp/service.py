@@ -8,7 +8,7 @@ import hashlib
 import secrets
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode, urlparse
 
@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ii_agent.core.config.mcp import MCPSettings
 from ii_agent.core.config.settings import Settings
 from ii_agent.core.secrets.encryption import encryption_manager
+from ii_agent.sessions.repository import SessionRepository
 from ii_agent.settings.mcp.exceptions import MCPOAuthError, MCPSettingNotFoundError
 from ii_agent.settings.mcp.models import MCPSetting
 from ii_agent.settings.mcp.repository import MCPSettingRepository
@@ -26,6 +27,7 @@ from ii_agent.settings.mcp.schemas import (
     ClaudeCodeMetadata,
     ClaudeCodeOAuthStartResponse,
     CodexMetadata,
+    MCPDefaultSelectionInfo,
     CodexOpenAIDevicePollResponse,
     CodexOpenAIDeviceStartResponse,
     MCPServersConfig,
@@ -35,6 +37,8 @@ from ii_agent.settings.mcp.schemas import (
     MCPSettingUpdate,
     validate_metadata,
 )
+from ii_agent.settings.provider_connections.service import ProviderConnectionService
+from ii_agent.users.repository import UserRepository
 
 OPENAI_DEVICE_CODE_TTL_SECONDS = 15 * 60
 CLAUDE_CODE_OAUTH_SALT = "claude-code-oauth"
@@ -52,23 +56,24 @@ class MCPSettingService:
         *,
         repo: MCPSettingRepository,
         config: Settings,
+        user_repo: UserRepository | None = None,
+        session_repo: SessionRepository | None = None,
+        provider_connection_service: ProviderConnectionService | None = None,
     ) -> None:
         self._config = config
         self._repo = repo
+        self._user_repo = user_repo
+        self._session_repo = session_repo
+        self._provider_connection_service = provider_connection_service
 
     async def create_mcp_settings(
         self, db: AsyncSession, *, mcp_setting_in: MCPSettingCreate, user_id: uuid.UUID
     ) -> MCPSettingInfo:
         """Create new MCP settings for a user."""
-        active_settings = await self._repo.list_active_by_user(db, user_id)
-        for setting in active_settings:
-            setting.is_active = False
-            setting.updated_at = datetime.now(timezone.utc)
-            await self._repo.update(db, setting)
-
         new_setting = MCPSetting(
             id=str(uuid.uuid4()),
             user_id=user_id,
+            provider_connection_id=_extract_provider_connection_id(mcp_setting_in.metadata),
             mcp_config=mcp_setting_in.mcp_config.model_dump(exclude_none=True),
             mcp_metadata=None
             if not mcp_setting_in.metadata
@@ -98,6 +103,9 @@ class MCPSettingService:
             setting.mcp_config = setting_update.mcp_config.model_dump(exclude_none=True)
         if setting_update.metadata is not None:
             setting.mcp_metadata = setting_update.metadata.model_dump(exclude_none=True)
+            setting.provider_connection_id = _extract_provider_connection_id(
+                setting_update.metadata
+            )
         if setting_update.is_active is not None:
             setting.is_active = setting_update.is_active
 
@@ -138,6 +146,11 @@ class MCPSettingService:
         if not setting:
             return False
 
+        await self._clear_runtime_selection_references(
+            db,
+            user_id=user_id,
+            setting_id=setting.id,
+        )
         await self._repo.delete(db, setting)
         return True
 
@@ -163,6 +176,124 @@ class MCPSettingService:
             return None
         return _to_mcp_setting_info(setting)
 
+    async def get_default_selection_info(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+    ) -> MCPDefaultSelectionInfo:
+        """Return the user's current default MCP runtime selection."""
+        user = await self._require_user_repo().get_by_id(db, user_id)
+        return MCPDefaultSelectionInfo(
+            default_mcp_setting_id=getattr(user, "default_mcp_setting_id", None) if user else None
+        )
+
+    async def set_default_runtime_setting(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        setting_id: uuid.UUID | None,
+    ) -> MCPDefaultSelectionInfo:
+        """Set or clear the user's default MCP runtime selection."""
+        user_repo = self._require_user_repo()
+        user = await user_repo.get_by_id(db, user_id)
+        if user is None:
+            raise MCPSettingNotFoundError(f"User {user_id} not found")
+
+        if setting_id is not None:
+            await self.assert_runtime_setting_selectable(
+                db,
+                user_id=user_id,
+                setting_id=setting_id,
+                selection_kind="default",
+            )
+
+        await user_repo.set_default_mcp_setting_id(db, user, setting_id)
+        return MCPDefaultSelectionInfo(default_mcp_setting_id=setting_id)
+
+    async def assert_runtime_setting_selectable(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID | str,
+        setting_id: uuid.UUID,
+        selection_kind: str = "runtime",
+    ) -> MCPSetting:
+        """Validate that a runtime setting can be selected for use."""
+        setting = await self._repo.get_by_id_and_user(db, setting_id, user_id)
+        if not setting or not _is_runtime_setting(setting):
+            raise MCPSettingNotFoundError(f"MCP setting {setting_id} not found or access denied")
+        if not setting.is_active:
+            raise MCPOAuthError(f"{selection_kind.capitalize()} MCP runtime must be active")
+        if not await self._setting_has_provider_credentials(
+            db,
+            user_id=user_id,
+            setting=setting,
+        ):
+            raise MCPOAuthError(
+                f"{selection_kind.capitalize()} MCP runtime is missing provider credentials"
+            )
+        return setting
+
+    async def resolve_effective_runtime_setting(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID | str,
+        session_id: uuid.UUID | None = None,
+    ) -> Optional[MCPSetting]:
+        """Resolve the runtime setting selected for a session or user."""
+        session_repo = self._require_session_repo()
+        user_repo = self._require_user_repo()
+
+        if session_id is not None:
+            session = await session_repo.get_by_id(db, session_id)
+            if session and getattr(session, "mcp_setting_id", None):
+                session_setting = await self._repo.get_by_id_and_user(
+                    db,
+                    session.mcp_setting_id,
+                    user_id,
+                )
+                if session_setting and await self._is_usable_runtime_setting(
+                    db,
+                    user_id=user_id,
+                    setting=session_setting,
+                ):
+                    return session_setting
+
+        user = await user_repo.get_by_id(db, user_id)
+        if user and getattr(user, "default_mcp_setting_id", None):
+            default_setting = await self._repo.get_by_id_and_user(
+                db,
+                user.default_mcp_setting_id,
+                user_id,
+            )
+            if default_setting and await self._is_usable_runtime_setting(
+                db,
+                user_id=user_id,
+                setting=default_setting,
+            ):
+                return default_setting
+
+        runtime_settings = await self._repo.list_runtime_settings_by_user(
+            db,
+            user_id,
+            only_active=True,
+        )
+        preferred_runtime_settings = sorted(
+            runtime_settings,
+            key=lambda setting: 0 if _tool_type(setting) == "codex" else 1,
+        )
+        for setting in preferred_runtime_settings:
+            if await self._is_usable_runtime_setting(
+                db,
+                user_id=user_id,
+                setting=setting,
+            ):
+                return setting
+        return None
+
     async def configure_codex(
         self,
         db: AsyncSession,
@@ -179,10 +310,25 @@ class MCPSettingService:
         existing_metadata = (
             existing.mcp_metadata if existing and isinstance(existing.mcp_metadata, dict) else None
         )
+        existing_auth_json: Optional[Dict[str, Any]] = None
+        if (
+            existing
+            and getattr(existing, "provider_connection_id", None)
+            and self._provider_connection_service is not None
+        ):
+            existing_connection = await self._provider_connection_service.get_connection_model(
+                db,
+                connection_id=getattr(existing, "provider_connection_id"),
+                user_id=user_id,
+            )
+            if existing_connection:
+                existing_auth_json = self._provider_connection_service.get_credentials_dict(
+                    existing_connection
+                )
         resolved_auth_json, auth_mode = _resolve_codex_auth(
             auth_json=auth_json,
             apikey=apikey,
-            existing_metadata=existing_metadata,
+            existing_auth_json=existing_auth_json or _extract_codex_auth_json(existing_metadata),
         )
         if not resolved_auth_json:
             raise MCPOAuthError("Authentication JSON or API Key is required")
@@ -211,24 +357,48 @@ class MCPSettingService:
                 }
             }
         )
+        claims = _extract_openai_auth_claims(resolved_auth_json)
+        connected_at = (
+            (existing_metadata or {}).get("oauth_connected_at")
+            if auth_mode == "openai_oauth"
+            else None
+        ) or datetime.now(timezone.utc).isoformat()
+        provider_connection = await self._require_provider_connection_service().upsert_connection(
+            db,
+            user_id=user_id,
+            provider="openai",
+            product="codex",
+            credentials=resolved_auth_json,
+            auth_mode=auth_mode,
+            external_account_id=claims.get("chatgpt_account_id"),
+            display_name="Codex",
+            connection_metadata={
+                "chatgpt_plan_type": claims.get("chatgpt_plan_type"),
+                "chatgpt_account_id": claims.get("chatgpt_account_id"),
+                "oauth_connected_at": connected_at if auth_mode == "openai_oauth" else None,
+            },
+        )
         metadata = CodexMetadata.model_validate(
             _build_codex_metadata(
-                auth_json=resolved_auth_json,
                 auth_mode=auth_mode,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 search=search,
                 previous_metadata=existing_metadata,
+                provider_connection_id=provider_connection.id,
+                connection_metadata=provider_connection.connection_metadata or {},
             )
         )
 
-        return await self._upsert_by_metadata_type(
+        setting = await self._upsert_by_metadata_type(
             db,
             user_id=user_id,
-            metadata_cls=CodexMetadata,
             mcp_config=mcp_config,
             metadata=metadata,
         )
+        if self._user_repo is not None:
+            await self.set_default_runtime_setting(db, user_id=user_id, setting_id=setting.id)
+        return setting
 
     async def start_codex_openai_device_oauth(
         self,
@@ -402,7 +572,24 @@ class MCPSettingService:
                 "scopes": ["user:inference", "user:profile"],
             }
         }
-        metadata = ClaudeCodeMetadata(auth_json=auth_json, store_path="")  # pyright: ignore
+        expires_at = datetime.now(timezone.utc) + timedelta(seconds=tokens["expires_in"])
+        provider_connection = await self._require_provider_connection_service().upsert_connection(
+            db,
+            user_id=user_id,
+            provider="anthropic",
+            product="claude_code",
+            credentials=auth_json,
+            auth_mode="anthropic_oauth",
+            display_name="Claude Code",
+            scopes={"values": ["user:inference", "user:profile"]},
+            expires_at=expires_at,
+            connection_metadata={"oauth_connected_at": datetime.now(timezone.utc).isoformat()},
+        )
+        metadata = ClaudeCodeMetadata(
+            provider_connection_id=provider_connection.id,
+            has_auth=True,
+            store_path="~/.claude",
+        )
 
         mcp_config = MCPServersConfig.model_validate(
             {
@@ -415,20 +602,21 @@ class MCPSettingService:
             }
         )
 
-        return await self._upsert_by_metadata_type(
+        setting = await self._upsert_by_metadata_type(
             db,
             user_id=user_id,
-            metadata_cls=ClaudeCodeMetadata,
             mcp_config=mcp_config,
             metadata=metadata,
         )
+        if self._user_repo is not None:
+            await self.set_default_runtime_setting(db, user_id=user_id, setting_id=setting.id)
+        return setting
 
     async def _upsert_by_metadata_type(
         self,
         db: AsyncSession,
         *,
         user_id: uuid.UUID,
-        metadata_cls: type,
         mcp_config: MCPServersConfig,
         metadata: CodexMetadata | ClaudeCodeMetadata,
     ) -> MCPSettingInfo:
@@ -453,6 +641,82 @@ class MCPSettingService:
             ),
             user_id=user_id,
         )
+
+    def _require_user_repo(self) -> UserRepository:
+        if self._user_repo is None:
+            raise RuntimeError("UserRepository is required for runtime selection")
+        return self._user_repo
+
+    def _require_session_repo(self) -> SessionRepository:
+        if self._session_repo is None:
+            raise RuntimeError("SessionRepository is required for runtime selection")
+        return self._session_repo
+
+    def _require_provider_connection_service(self) -> ProviderConnectionService:
+        if self._provider_connection_service is None:
+            raise RuntimeError("ProviderConnectionService is required for provider auth storage")
+        return self._provider_connection_service
+
+    async def _clear_runtime_selection_references(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        setting_id: uuid.UUID,
+    ) -> None:
+        """Clear user/session runtime selections that point at a setting being deleted."""
+        if self._user_repo is not None:
+            user = await self._user_repo.get_by_id(db, user_id)
+            if user and getattr(user, "default_mcp_setting_id", None) == setting_id:
+                await self._user_repo.set_default_mcp_setting_id(db, user, None)
+
+        if self._session_repo is not None:
+            await self._session_repo.clear_mcp_setting_references(
+                db,
+                user_id=user_id,
+                setting_id=setting_id,
+            )
+
+    async def _is_usable_runtime_setting(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID | str,
+        setting: MCPSetting,
+    ) -> bool:
+        """Return whether a runtime setting is active, typed correctly, and has credentials."""
+        return (
+            setting.is_active
+            and _is_runtime_setting(setting)
+            and await self._setting_has_provider_credentials(
+                db,
+                user_id=user_id,
+                setting=setting,
+            )
+        )
+
+    async def _setting_has_provider_credentials(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID | str,
+        setting: MCPSetting,
+    ) -> bool:
+        """Return whether a runtime setting still has provider credentials available."""
+        provider_connection_id = getattr(setting, "provider_connection_id", None)
+        if not provider_connection_id:
+            return False
+        if self._provider_connection_service is None:
+            return True
+
+        connection = await self._provider_connection_service.get_connection_model(
+            db,
+            connection_id=provider_connection_id,
+            user_id=user_id,
+        )
+        if connection is None:
+            return False
+        return bool(self._provider_connection_service.get_credentials_dict(connection))
 
 
 def _generate_pkce_pair() -> tuple[str, str]:
@@ -658,7 +922,7 @@ def _resolve_codex_auth(
     *,
     auth_json: Optional[Dict[str, Any]],
     apikey: Optional[str],
-    existing_metadata: Optional[dict[str, Any]],
+    existing_auth_json: Optional[Dict[str, Any]],
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Resolve Codex auth input while preserving existing credentials when appropriate."""
     if auth_json and apikey:
@@ -670,9 +934,8 @@ def _resolve_codex_auth(
     if apikey:
         return {"OPENAI_API_KEY": apikey}, "api_key"
 
-    existing_auth_json = _extract_codex_auth_json(existing_metadata)
     if existing_auth_json:
-        return existing_auth_json, str((existing_metadata or {}).get("auth_mode") or "")
+        return existing_auth_json, _infer_codex_auth_mode(existing_auth_json)
 
     return None, None
 
@@ -714,16 +977,17 @@ def _extract_codex_auth_json(metadata: Optional[dict[str, Any]]) -> Optional[Dic
 
 def _build_codex_metadata(
     *,
-    auth_json: Dict[str, Any],
     auth_mode: Optional[str],
     model: Optional[str],
     reasoning_effort: Optional[str],
     search: bool,
     previous_metadata: Optional[dict[str, Any]],
+    provider_connection_id: uuid.UUID | str,
+    connection_metadata: Optional[dict[str, Any]],
 ) -> dict[str, Any]:
     """Build the stored/public Codex metadata payload."""
-    resolved_auth_mode = auth_mode or _infer_codex_auth_mode(auth_json)
-    claims = _extract_openai_auth_claims(auth_json) if resolved_auth_mode == "openai_oauth" else {}
+    resolved_auth_mode = auth_mode
+    claims = connection_metadata or {}
     connected_at = (
         (previous_metadata or {}).get("oauth_connected_at")
         if resolved_auth_mode == "openai_oauth"
@@ -734,6 +998,7 @@ def _build_codex_metadata(
         "tool_type": "codex",
         "store_path": "~/.codex",
         "has_auth": True,
+        "provider_connection_id": provider_connection_id,
         "auth_mode": resolved_auth_mode,
         "oauth_provider": "openai" if resolved_auth_mode == "openai_oauth" else None,
         "oauth_connected_at": connected_at if resolved_auth_mode == "openai_oauth" else None,
@@ -742,7 +1007,6 @@ def _build_codex_metadata(
         "model": model,
         "model_reasoning_effort": reasoning_effort,
         "search": search,
-        "encrypted_auth_json": encryption_manager.encrypt(json.dumps(auth_json)),
     }
 
 
@@ -853,12 +1117,24 @@ def _normalize_metadata(
     processed = dict(metadata_dict)
     if processed.get("tool_type") == "codex":
         auth_json = _extract_codex_auth_json(processed)
-        processed["has_auth"] = bool(auth_json)
+        processed["has_auth"] = bool(auth_json or processed.get("provider_connection_id"))
         if include_secrets and auth_json:
             processed["auth_json"] = auth_json
         else:
             processed.pop("auth_json", None)
         processed.pop("encrypted_auth_json", None)
+    if processed.get("tool_type") == "claude_code":
+        auth_json = processed.get("auth_json")
+        if isinstance(auth_json, str):
+            try:
+                auth_json = json.loads(auth_json)
+            except json.JSONDecodeError:
+                auth_json = None
+        processed["has_auth"] = bool(auth_json or processed.get("provider_connection_id"))
+        if include_secrets and auth_json:
+            processed["auth_json"] = auth_json
+        else:
+            processed.pop("auth_json", None)
     return processed
 
 
@@ -885,3 +1161,26 @@ def _to_mcp_setting_info(setting: MCPSetting, *, include_secrets: bool = False) 
         created_at=setting.created_at.isoformat() if setting.created_at else "",
         updated_at=setting.updated_at.isoformat() if setting.updated_at else None,
     )
+
+
+def _extract_provider_connection_id(metadata: Any) -> uuid.UUID | None:
+    """Pull provider_connection_id from typed metadata when present."""
+    if metadata is None:
+        return None
+    provider_connection_id = getattr(metadata, "provider_connection_id", None)
+    if provider_connection_id is None and isinstance(metadata, dict):
+        provider_connection_id = metadata.get("provider_connection_id")
+    return provider_connection_id
+
+
+def _tool_type(setting: MCPSetting) -> str | None:
+    metadata = setting.mcp_metadata or {}
+    if isinstance(metadata, dict):
+        tool_type = metadata.get("tool_type")
+        if isinstance(tool_type, str):
+            return tool_type
+    return None
+
+
+def _is_runtime_setting(setting: MCPSetting) -> bool:
+    return _tool_type(setting) in {"codex", "claude_code"}

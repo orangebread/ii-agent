@@ -39,6 +39,24 @@ class MCPSettingRepository(BaseRepository[MCPSetting]):
         )
         return result.scalar_one_or_none()
 
+    async def list_runtime_settings_by_user(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID | str,
+        *,
+        only_active: bool = False,
+    ) -> List[MCPSetting]:
+        """List provider-backed runtime settings for a user."""
+        query = select(MCPSetting).where(
+            MCPSetting.user_id == user_id,
+            MCPSetting.mcp_metadata["tool_type"].astext.in_(("codex", "claude_code")),
+        )
+        if only_active:
+            query = query.where(MCPSetting.is_active)
+        query = query.order_by(MCPSetting.created_at.desc())
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
     async def list_by_user(
         self,
         db: AsyncSession,

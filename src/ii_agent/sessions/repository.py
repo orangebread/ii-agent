@@ -146,3 +146,21 @@ class SessionRepository(BaseRepository[Session]):
             )
         )
         return list(result.scalars().all())
+
+    async def clear_mcp_setting_references(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        setting_id: uuid.UUID,
+    ) -> None:
+        """Clear session runtime overrides pointing at a deleted MCP setting."""
+        result = await db.execute(
+            select(Session).where(
+                Session.user_id == user_id,
+                Session.mcp_setting_id == setting_id,
+            )
+        )
+        for session in result.scalars().all():
+            session.mcp_setting_id = None
+        await db.flush()

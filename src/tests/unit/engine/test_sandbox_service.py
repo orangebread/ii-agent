@@ -2,6 +2,8 @@ import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+import types
+import sys
 
 import pytest
 
@@ -14,6 +16,7 @@ from ii_agent.agents.sandboxes.shell import (
 )
 from ii_agent.agents.sandboxes.service import SandboxService
 from ii_agent.agents.sandboxes.types import SandboxProviderType, SandboxStatus
+from ii_agent.settings.mcp.schemas import MCPServersConfig, MCPSettingInfo
 
 
 class FakeSandboxRepo:
@@ -241,6 +244,122 @@ async def test_get_sandbox_by_session_loads_user_from_session_when_db_is_implici
         session_id=session_id,
         user_id=user_id,
     )
+
+
+class _FakeMCPClient:
+    instances = []
+
+    def __init__(self, sandbox_url):
+        self.sandbox_url = sandbox_url
+        self.register_codex = AsyncMock()
+        self.register_custom_mcp = AsyncMock()
+        self.__class__.instances.append(self)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_register_user_mcp_servers_registers_selected_codex(monkeypatch, settings_factory):
+    session_id = uuid.uuid4()
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(),
+    )
+    custom_setting = MCPSettingInfo(
+        id=uuid.uuid4(),
+        mcp_config=MCPServersConfig.model_validate(
+            {"mcpServers": {"custom-server": {"command": "npx", "args": ["custom"]}}}
+        ),
+        metadata=None,
+        is_active=True,
+        created_at="2026-04-16T00:00:00+00:00",
+        updated_at=None,
+    )
+    selected_runtime = SimpleNamespace(
+        provider_connection_id=uuid.uuid4(),
+        mcp_metadata={"tool_type": "codex"},
+        mcp_config={"mcpServers": {"codex-as-mcp": {"command": "uvx"}}},
+    )
+    sandbox = SimpleNamespace(
+        session_id=str(session_id),
+        write_file=AsyncMock(),
+    )
+
+    monkeypatch.setattr(
+        "ii_agent.settings.mcp.service.MCPSettingService.list_mcp_settings",
+        AsyncMock(return_value=SimpleNamespace(settings=[custom_setting])),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.mcp.service.MCPSettingService.resolve_effective_runtime_setting",
+        AsyncMock(return_value=selected_runtime),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.provider_connections.service.ProviderConnectionService.get_connection_model",
+        AsyncMock(return_value=SimpleNamespace(id=selected_runtime.provider_connection_id)),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.provider_connections.service.ProviderConnectionService.get_credentials_dict",
+        lambda self, connection: {"tokens": {"refresh_token": "refresh-123"}},
+    )
+    monkeypatch.setattr(service, "_get_composio_mcp_servers", AsyncMock(return_value=None))
+    sys.modules["ii_server.mcp.client"] = types.SimpleNamespace(MCPClient=_FakeMCPClient)
+
+    await service._register_user_mcp_servers(sandbox, uuid.uuid4(), "http://sandbox", None)
+
+    sandbox.write_file.assert_awaited()
+    client = _FakeMCPClient.instances[-1]
+    client.register_codex.assert_awaited_once()
+    client.register_custom_mcp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_register_user_mcp_servers_registers_selected_claude(monkeypatch, settings_factory):
+    session_id = uuid.uuid4()
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(),
+    )
+    selected_runtime = SimpleNamespace(
+        provider_connection_id=uuid.uuid4(),
+        mcp_metadata={"tool_type": "claude_code"},
+        mcp_config={"mcpServers": {"claude-code-mcp": {"command": "npx"}}},
+    )
+    sandbox = SimpleNamespace(
+        session_id=str(session_id),
+        write_file=AsyncMock(),
+    )
+
+    monkeypatch.setattr(
+        "ii_agent.settings.mcp.service.MCPSettingService.list_mcp_settings",
+        AsyncMock(return_value=SimpleNamespace(settings=[])),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.mcp.service.MCPSettingService.resolve_effective_runtime_setting",
+        AsyncMock(return_value=selected_runtime),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.provider_connections.service.ProviderConnectionService.get_connection_model",
+        AsyncMock(return_value=SimpleNamespace(id=selected_runtime.provider_connection_id)),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.provider_connections.service.ProviderConnectionService.get_credentials_dict",
+        lambda self, connection: {"claudeAiOauth": {"refreshToken": "refresh-123"}},
+    )
+    monkeypatch.setattr(service, "_get_composio_mcp_servers", AsyncMock(return_value=None))
+    sys.modules["ii_server.mcp.client"] = types.SimpleNamespace(MCPClient=_FakeMCPClient)
+
+    await service._register_user_mcp_servers(sandbox, uuid.uuid4(), "http://sandbox", None)
+
+    sandbox.write_file.assert_awaited()
+    client = _FakeMCPClient.instances[-1]
+    client.register_codex.assert_not_awaited()
+    client.register_custom_mcp.assert_awaited_once()
 
 
 @pytest.mark.asyncio

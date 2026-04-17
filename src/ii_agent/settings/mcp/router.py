@@ -9,6 +9,8 @@ from ii_agent.settings.mcp.exceptions import MCPSettingNotFoundError
 from ii_agent.settings.mcp.dependencies import MCPSettingServiceDep
 from ii_agent.settings.mcp.schemas import (
     CodexConfigConfigure,
+    MCPDefaultSelectionInfo,
+    MCPDefaultSelectionUpdate,
     CodexOpenAIDevicePollRequest,
     CodexOpenAIDevicePollResponse,
     CodexOpenAIDeviceStartRequest,
@@ -25,6 +27,31 @@ from ii_agent.settings.mcp.schemas import (
 
 
 router = APIRouter(prefix="/mcp", tags=["User MCP Settings Management"])
+
+
+@router.get("/default", response_model=MCPDefaultSelectionInfo)
+async def get_default_mcp_setting(
+    current_user: CurrentUser,
+    service: MCPSettingServiceDep,
+    db: DBSession,
+):
+    """Get the user's default MCP runtime selection."""
+    return await service.get_default_selection_info(db, user_id=current_user.id)
+
+
+@router.patch("/default", response_model=MCPDefaultSelectionInfo)
+async def update_default_mcp_setting(
+    payload: MCPDefaultSelectionUpdate,
+    current_user: CurrentUser,
+    service: MCPSettingServiceDep,
+    db: DBSession,
+):
+    """Update the user's default MCP runtime selection."""
+    return await service.set_default_runtime_setting(
+        db,
+        user_id=current_user.id,
+        setting_id=payload.setting_id,
+    )
 
 
 @router.get("/codex", response_model=Optional[MCPSettingInfo])

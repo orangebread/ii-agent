@@ -40,6 +40,9 @@ class Session(Base):
     model_setting_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("model_settings.id"), nullable=True
     )
+    mcp_setting_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mcp_settings.id", ondelete="SET NULL"), nullable=True
+    )
     name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     status: Mapped[SessionState] = mapped_column(String, default=SessionState.ACTIVE)
     agent_type: Mapped[Optional[AgentType]] = mapped_column(String, nullable=True)
@@ -109,6 +112,7 @@ class Session(Base):
         Index("idx_sessions_status", "status"),
         Index("idx_sessions_created_at", "created_at"),
         Index("idx_sessions_model_setting_id", "model_setting_id"),
+        Index("idx_sessions_mcp_setting_id", "mcp_setting_id"),
     )
 
     __mapper_args__ = {"version_id_col": version}
