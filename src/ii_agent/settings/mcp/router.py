@@ -14,6 +14,9 @@ from ii_agent.settings.mcp.schemas import (
     CodexOpenAIDeviceStartRequest,
     CodexOpenAIDeviceStartResponse,
     ClaudeCodeConfigConfigure,
+    ClaudeCodeOAuthCompleteRequest,
+    ClaudeCodeOAuthStartRequest,
+    ClaudeCodeOAuthStartResponse,
     MCPSettingCreate,
     MCPSettingUpdate,
     MCPSettingInfo,
@@ -105,6 +108,36 @@ async def configure_claude_code_mcp(
         db,
         user_id=str(current_user.id),
         authorization_code=request.authorization_code,
+    )
+
+
+@router.post("/claude-code/oauth/start", response_model=ClaudeCodeOAuthStartResponse)
+async def start_claude_code_oauth(
+    request: ClaudeCodeOAuthStartRequest,
+    current_user: CurrentUser,
+    service: MCPSettingServiceDep,
+):
+    """Start the Claude Code OAuth flow."""
+    return await service.start_claude_code_oauth(
+        user_id=str(current_user.id),
+        redirect_uri=request.redirect_uri,
+    )
+
+
+@router.post("/claude-code/oauth/complete", response_model=MCPSettingInfo)
+async def complete_claude_code_oauth(
+    request: ClaudeCodeOAuthCompleteRequest,
+    current_user: CurrentUser,
+    service: MCPSettingServiceDep,
+    db: DBSession,
+):
+    """Complete the Claude Code OAuth flow."""
+    return await service.complete_claude_code_oauth(
+        db,
+        user_id=str(current_user.id),
+        login_id=request.login_id,
+        code=request.code,
+        state=request.state,
     )
 
 

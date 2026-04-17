@@ -110,7 +110,11 @@ const MediaSetting = ({
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="pt-3 md:pt-12 w-full !max-w-[480px]">
+            <SheetContent
+                className="pt-3 md:pt-12 w-full !max-w-[480px]"
+                accessibleTitle="Media Settings"
+                accessibleDescription="Configure your media provider and API settings."
+            >
                 <SheetHeader className="px-6 pt-0 gap-1 pb-4">
                     <div className="flex items-center justify-between">
                         <p className="text-2xl font-semibold">Media Settings</p>

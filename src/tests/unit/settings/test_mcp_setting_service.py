@@ -90,6 +90,40 @@ async def test_configure_claude_code_validates_authorization_format(settings_fac
 
 
 @pytest.mark.asyncio
+async def test_start_claude_code_oauth_returns_login_data(settings_factory):
+    service = MCPSettingService(repo=FakeMCPRepo(), config=settings_factory())
+
+    result = await service.start_claude_code_oauth(
+        user_id="u1",
+        redirect_uri="http://localhost:1420/claude-code-callback",
+    )
+
+    assert result.login_id
+    assert result.authorization_url.startswith("https://claude.ai/oauth/authorize?")
+    assert "redirect_uri=http%3A%2F%2Flocalhost%3A1420%2Fclaude-code-callback" in (
+        result.authorization_url
+    )
+
+
+@pytest.mark.asyncio
+async def test_complete_claude_code_oauth_validates_state(settings_factory):
+    service = MCPSettingService(repo=FakeMCPRepo(), config=settings_factory())
+    start = await service.start_claude_code_oauth(
+        user_id="u1",
+        redirect_uri="http://localhost:1420/claude-code-callback",
+    )
+
+    with pytest.raises(MCPOAuthError, match="state mismatch"):
+        await service.complete_claude_code_oauth(
+            db=None,
+            user_id="u1",
+            login_id=start.login_id,
+            code="auth-code",
+            state="wrong-state",
+        )
+
+
+@pytest.mark.asyncio
 async def test_start_codex_openai_device_oauth_returns_login_data(settings_factory):
     service = MCPSettingService(repo=FakeMCPRepo(), config=settings_factory())
 

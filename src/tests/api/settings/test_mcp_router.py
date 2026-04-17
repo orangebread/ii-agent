@@ -13,6 +13,8 @@ EXPECTED_ROUTES = {
     ("POST", "/mcp/codex/openai/device/poll"),
     ("GET", "/mcp/claude-code"),
     ("POST", "/mcp/claude-code"),
+    ("POST", "/mcp/claude-code/oauth/start"),
+    ("POST", "/mcp/claude-code/oauth/complete"),
     ("POST", "/mcp"),
     ("GET", "/mcp"),
     ("GET", "/mcp/{setting_id}"),

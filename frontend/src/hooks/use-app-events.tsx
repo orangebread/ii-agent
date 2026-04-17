@@ -82,6 +82,7 @@ import {
     isActiveRunStatus,
     isTerminalRunStatus
 } from '@/typings/agent'
+import { IS_LOCAL_DEPLOYMENT } from '@/constants/features'
 import { normalizeAttachment } from '@/utils/attachments'
 
 export function useAppEvents() {
@@ -241,7 +242,7 @@ export function useAppEvents() {
                 dispatch(setRunStatus(runStatus))
                 dispatch(setLoading(isActiveRunStatus(runStatus)))
                 if (runStatus !== RunStatus.ABORTING) {
-                   dispatch(setCancelling(false))
+                    dispatch(setCancelling(false))
                 }
                 if (isTerminalRunStatus(runStatus)) {
                     dispatch(setLoading(false))
@@ -553,7 +554,10 @@ export function useAppEvents() {
                     const errorMessage =
                         (data.content.message as string) ||
                         'An unexpected error occurred.'
-                    const errorCode = (data.content.error_code ?? (data as Record<string, unknown>).error_code) as ErrorCode | undefined
+                    const errorCode = (data.content.error_code ??
+                        (data as Record<string, unknown>).error_code) as
+                        | ErrorCode
+                        | undefined
                     const sessionIdFromEvent =
                         (data.session_id as string | undefined) ??
                         (data.content.session_id as string | undefined)
@@ -561,9 +565,15 @@ export function useAppEvents() {
                     if (errorCode === ErrorCode.INSUFFICIENT_CREDITS) {
                         if (!ignoreClickAction) {
                             toast.error(
-                                'You have run out of credits. Redirecting to upgrade your plan...'
+                                IS_LOCAL_DEPLOYMENT
+                                    ? 'You have run out of local usage budget. Opening usage details...'
+                                    : 'You have run out of credits. Redirecting to upgrade your plan...'
                             )
-                            navigate('/settings/subscription')
+                            navigate(
+                                IS_LOCAL_DEPLOYMENT
+                                    ? '/settings/usage'
+                                    : '/settings/subscription'
+                            )
                         }
                         streamingMessageIdsRef.current.thinking.clear()
                         streamingMessageIdsRef.current.response.clear()
@@ -661,7 +671,9 @@ export function useAppEvents() {
 
                 case AgentEvent.SYSTEM: {
                     // Design mode sync completion events
-                    const systemOperation = data.content.operation as string | undefined
+                    const systemOperation = data.content.operation as
+                        | string
+                        | undefined
                     if (
                         systemOperation === 'design_sync_complete' ||
                         systemOperation === 'design_sync_state_complete' ||
@@ -686,7 +698,7 @@ export function useAppEvents() {
                                 detail: {
                                     operation: systemOperation,
                                     session_id: sessionIdFromEvent,
-                                    ...data.content,
+                                    ...data.content
                                 }
                             })
                         )
@@ -800,7 +812,9 @@ export function useAppEvents() {
                                 content: messageContent,
                                 timestamp: Date.now(),
                                 ...(files && files.length > 0 ? { files } : {}),
-                                ...(Object.keys(fileContents).length > 0 ? { fileContents } : {})
+                                ...(Object.keys(fileContents).length > 0
+                                    ? { fileContents }
+                                    : {})
                             })
                         )
                     }
@@ -1594,7 +1608,9 @@ export function useAppEvents() {
 
                 case AgentEvent.FILE_TREE: {
                     const tree = data.content.tree as FileTreeNode | null
-                    const rootPath = data.content.root_path as string | undefined
+                    const rootPath = data.content.root_path as
+                        | string
+                        | undefined
                     const contents = data.content.contents as
                         | Record<string, CachedContent>
                         | undefined
@@ -1619,7 +1635,9 @@ export function useAppEvents() {
                         | 'image'
                         | 'binary'
                         | undefined
-                    const mimeType = data.content.mime_type as string | undefined
+                    const mimeType = data.content.mime_type as
+                        | string
+                        | undefined
                     const message = data.content.message as string | undefined
                     const tooBig = Boolean(data.content.too_big)
                     const error = data.content.error as string | undefined
@@ -1643,7 +1661,9 @@ export function useAppEvents() {
 
                 case AgentEvent.FILE_TREE_UPDATE: {
                     const tree = data.content.tree as FileTreeNode | null
-                    const rootPath = data.content.root_path as string | undefined
+                    const rootPath = data.content.root_path as
+                        | string
+                        | undefined
                     const contents = data.content.contents as
                         | Record<string, CachedContent>
                         | undefined
@@ -1662,7 +1682,10 @@ export function useAppEvents() {
                             })
                         )
                     }
-                    if (updatedContents && Object.keys(updatedContents).length > 0) {
+                    if (
+                        updatedContents &&
+                        Object.keys(updatedContents).length > 0
+                    ) {
                         dispatch(updateCachedContents(updatedContents))
                     }
                     if (changes && changes.length > 0) {
@@ -1681,7 +1704,6 @@ export function useAppEvents() {
                     }
                     break
                 }
-
             }
         },
         [

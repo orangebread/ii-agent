@@ -77,6 +77,11 @@ class MCPSettings(BaseSettings):
     )
 
     # Anthropic Console OAuth (for MCP server token exchange)
+    anthropic_oauth_authorize_url: str = Field(
+        default="https://claude.ai/oauth/authorize",
+        description="Anthropic OAuth authorization endpoint",
+    )
+
     anthropic_oauth_token_url: str = Field(
         default="https://console.anthropic.com/v1/oauth/token",
         description="Anthropic console OAuth token exchange endpoint",

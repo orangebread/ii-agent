@@ -102,7 +102,14 @@ const ConnectToolMCP = ({
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="px-3 md:px-6 py-3 md:py-12 w-full !max-w-[560px]">
+            <SheetContent
+                className="px-3 md:px-6 py-3 md:py-12 w-full !max-w-[560px]"
+                accessibleTitle={
+                    editingMcp
+                        ? t('agentSetting.toolSetting.mcpConnect.title.edit')
+                        : t('agentSetting.toolSetting.mcpConnect.title.connect')
+                }
+            >
                 <SheetHeader className="p-0 gap-6 pb-4">
                     <div className="flex items-center justify-between">
                         <p className="text-2xl font-semibold">

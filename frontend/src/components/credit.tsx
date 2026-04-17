@@ -9,6 +9,7 @@ import { SubscriptionPlan } from '@/typings/subscription'
 import CreditTooltip from './credit-tooltip'
 import { Icon } from './ui/icon'
 import UserProfileDropdown from './user-profile-dropdown'
+import { IS_LOCAL_DEPLOYMENT } from '@/constants/features'
 
 const Credit = () => {
     const { t } = useTranslation()
@@ -17,7 +18,10 @@ const Credit = () => {
     const subscriptionPlan = useAppSelector(selectSubscriptionPlan)
 
     // Use RTK Query hook instead of Redux selectors
-    const { data: balanceData, isLoading } = useGetCreditBalanceQuery()
+    const { data: balanceData, isLoading } = useGetCreditBalanceQuery(
+        undefined,
+        { skip: IS_LOCAL_DEPLOYMENT }
+    )
 
     const availableCredit = balanceData?.credits || 0
     const bonusCredit = balanceData?.bonus_credits || 0
@@ -39,6 +43,29 @@ const Credit = () => {
         () => subscriptionPlan === SubscriptionPlan.Pro,
         [subscriptionPlan]
     )
+
+    if (IS_LOCAL_DEPLOYMENT) {
+        return (
+            <div className="hidden md:flex flex-col items-start group-data-[collapsible=icon]:items-center gap-y-4 p-6 pb-8 border-t border-grey-2/30 dark:border-white/30 group-data-[collapsible=icon]:border-none group-data-[collapsible=icon]:gap-y-6">
+                <Link
+                    to="/settings/usage"
+                    className="flex items-center gap-x-2 rounded-full border border-grey-2/40 px-3 py-1.5 text-sm text-black dark:text-white group-data-[collapsible=icon]:px-0 group-data-[collapsible=icon]:border-none"
+                >
+                    <Icon
+                        name="dashboard-2"
+                        className="size-5 fill-black dark:fill-white"
+                    />
+                    <span className="group-data-[collapsible=icon]:hidden">
+                        {t('settings.tabs.usage')}
+                    </span>
+                </Link>
+
+                <UserProfileDropdown>
+                    <p className="text-sm cursor-pointer group-data-[collapsible=icon]:hidden">{`${user?.first_name} ${user?.last_name}`}</p>
+                </UserProfileDropdown>
+            </div>
+        )
+    }
 
     if (isLoading) return null
 

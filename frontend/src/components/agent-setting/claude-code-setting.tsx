@@ -1,19 +1,28 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+import dayjs from 'dayjs'
 
 import { settingsService } from '@/services/settings.service'
 import { useAppSelector } from '@/state'
 import { ISetting } from '@/typings'
 import { toast } from 'sonner'
+
 import { Button } from '../ui/button'
 import { Icon } from '../ui/icon'
-import { Input } from '../ui/input'
 import { Sheet, SheetClose, SheetContent, SheetHeader } from '../ui/sheet'
-import dayjs from 'dayjs'
 
 interface ClaudeCodeSettingProps {
     open: boolean
     onOpenChange: (open: boolean) => void
     onSaveConfig: (data: ISetting) => void
+}
+
+interface ClaudeCodeAuthMessage {
+    type?: string
+    code?: string
+    state?: string
+    error?: string
+    errorDescription?: string
 }
 
 const ClaudeCodeSetting = ({
@@ -31,120 +40,174 @@ const ClaudeCodeSetting = ({
         (state) => state.settings.claudeCodeConfig
     )
 
-    const [authCode, setAuthCode] = useState('')
+    const [oauthLoginId, setOauthLoginId] = useState<string | null>(null)
+    const [isConnectingClaude, setIsConnectingClaude] = useState(false)
+    const popupRef = useRef<Window | null>(null)
 
-    const handleCancel = () => {
+    const callbackUrl = useMemo(
+        () => `${window.location.origin}/claude-code-callback`,
+        []
+    )
+
+    const handleCancel = useCallback(() => {
+        popupRef.current?.close()
+        popupRef.current = null
+        setOauthLoginId(null)
+        setIsConnectingClaude(false)
         onOpenChange(false)
-    }
+    }, [onOpenChange])
 
-    // Generate PKCE challenge
-    const generatePKCE = () => {
-        const verifier = Array.from(crypto.getRandomValues(new Uint8Array(32)))
-            .map((b) => b.toString(16).padStart(2, '0'))
-            .join('')
+    const completeClaudeSave = useCallback(() => {
+        toast.success(
+            'Claude Code configuration saved and activated successfully'
+        )
+        popupRef.current?.close()
+        popupRef.current = null
+        setOauthLoginId(null)
+        setIsConnectingClaude(false)
+        onOpenChange(false)
+        onSaveConfig(currentSettingData as ISetting)
+    }, [currentSettingData, onOpenChange, onSaveConfig])
 
-        return verifier
-    }
+    const handleLoginWithClaude = useCallback(async () => {
+        try {
+            setIsConnectingClaude(true)
 
-    const handleLoginWithClaude = () => {
-        // Generate PKCE verifier
-        const codeVerifier = generatePKCE()
-
-        // Store the verifier for later use (you'll need this when handling the callback)
-        sessionStorage.setItem('claude_pkce_verifier', codeVerifier)
-
-        // Create SHA256 hash for code challenge
-        const encoder = new TextEncoder()
-        const data = encoder.encode(codeVerifier)
-
-        crypto.subtle.digest('SHA-256', data).then((hashBuffer) => {
-            const hashArray = Array.from(new Uint8Array(hashBuffer))
-            const codeChallenge = btoa(String.fromCharCode(...hashArray))
-                .replace(/\+/g, '-')
-                .replace(/\//g, '_')
-                .replace(/=/g, '')
-
-            // Build OAuth URL (using console mode)
-            const oauthParams = new URLSearchParams({
-                code: 'true',
-                client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
-                response_type: 'code',
-                redirect_uri:
-                    'https://console.anthropic.com/oauth/code/callback',
-                scope: 'org:create_api_key user:profile user:inference',
-                code_challenge: codeChallenge,
-                code_challenge_method: 'S256',
-                state: codeVerifier
+            const response = await settingsService.startClaudeCodeOAuth({
+                redirect_uri: callbackUrl
             })
 
-            const oauthUrl = `https://claude.ai/oauth/authorize?${oauthParams.toString()}`
+            setOauthLoginId(response.login_id)
 
-            // Open OAuth URL in new window
-            window.open(oauthUrl, '_blank')
-        })
-    }
+            const width = 540
+            const height = 760
+            const left = window.screenX + (window.outerWidth - width) / 2
+            const top = window.screenY + (window.outerHeight - height) / 2
+            const features = [
+                `width=${Math.max(420, Math.floor(width))}`,
+                `height=${Math.max(560, Math.floor(height))}`,
+                `left=${Math.max(0, Math.floor(left))}`,
+                `top=${Math.max(0, Math.floor(top))}`,
+                'resizable=yes',
+                'scrollbars=yes'
+            ].join(',')
 
-    const handleSaveConfig = async () => {
-        // Require authorization code
-        if (!authCode.trim()) {
-            toast.warning('Please provide Authorization Code')
-            return
-        }
+            const popup = window.open(
+                response.authorization_url,
+                'claude-code-oauth',
+                features
+            )
 
-        try {
-            // Get the stored PKCE verifier
-            const verifier = sessionStorage.getItem('claude_pkce_verifier')
-            if (!verifier) {
+            if (!popup) {
+                setIsConnectingClaude(false)
+                setOauthLoginId(null)
                 toast.error(
-                    'PKCE verifier not found. Please login with Claude again.'
+                    'Claude Code login requires a popup window. Allow popups and try again.'
                 )
                 return
             }
 
-            // Build authorization code with verifier in format: code#verifier
-            const authorizationCode = `${authCode.trim()}`
-
-            // Use the settings service with the new configureClaudeCode method
-            // This will create or update the Claude Code configuration and set is_active to true
-            await settingsService.configureClaudeCode({
-                authorization_code: authorizationCode
-            })
-
-            toast.success(
-                'Claude Code configuration saved and activated successfully'
-            )
-            onOpenChange(false)
-
-            // Clear the verifier from session storage
-            sessionStorage.removeItem('claude_pkce_verifier')
-
-            // Update the settings with claude_code enabled
-            const newSettings = {
-                ...currentSettingData,
-                claude_code: true // Set to true since we just activated it
-            }
-            onSaveConfig(newSettings)
+            popupRef.current = popup
+            popup.focus()
+            setIsConnectingClaude(false)
         } catch (error: unknown) {
+            console.error('Error starting Claude Code OAuth:', error)
             const apiError = error as {
                 response?: { data?: { detail?: string } }
             }
-            const errorMessage =
+            toast.error(
                 apiError.response?.data?.detail ||
-                'Failed to save Claude Code configuration'
-            toast.error(errorMessage)
+                    'Failed to start Claude Code connection'
+            )
+            setOauthLoginId(null)
+            setIsConnectingClaude(false)
         }
-    }
+    }, [callbackUrl])
 
     useEffect(() => {
-        // Clear auth code when dialog opens
-        if (open) {
-            setAuthCode('')
+        if (!open) {
+            popupRef.current?.close()
+            popupRef.current = null
+            setOauthLoginId(null)
+            setIsConnectingClaude(false)
         }
     }, [open])
 
+    useEffect(() => {
+        if (!open) {
+            return
+        }
+
+        const handleMessage = async (event: MessageEvent<ClaudeCodeAuthMessage>) => {
+            if (event.origin !== window.location.origin) {
+                return
+            }
+
+            const payload = event.data
+            if (!payload || payload.type !== 'claude-code-auth') {
+                return
+            }
+
+            if (payload.error) {
+                popupRef.current?.close()
+                popupRef.current = null
+                setOauthLoginId(null)
+                setIsConnectingClaude(false)
+                toast.error(
+                    payload.errorDescription ||
+                        'Claude Code authorization was cancelled.'
+                )
+                return
+            }
+
+            if (!payload.code || !payload.state || !oauthLoginId) {
+                popupRef.current?.close()
+                popupRef.current = null
+                setOauthLoginId(null)
+                setIsConnectingClaude(false)
+                toast.error(
+                    'Claude Code authorization response was incomplete. Start again.'
+                )
+                return
+            }
+
+            try {
+                await settingsService.completeClaudeCodeOAuth({
+                    login_id: oauthLoginId,
+                    code: payload.code,
+                    state: payload.state
+                })
+                completeClaudeSave()
+            } catch (error: unknown) {
+                console.error('Error completing Claude Code OAuth:', error)
+                const apiError = error as {
+                    response?: { data?: { detail?: string } }
+                }
+                popupRef.current?.close()
+                popupRef.current = null
+                setOauthLoginId(null)
+                setIsConnectingClaude(false)
+                toast.error(
+                    apiError.response?.data?.detail ||
+                        'Failed to complete Claude Code connection'
+                )
+            }
+        }
+
+        window.addEventListener('message', handleMessage)
+        return () => window.removeEventListener('message', handleMessage)
+    }, [completeClaudeSave, oauthLoginId, open])
+
+    const connectionCopy = oauthLoginId
+        ? 'Complete the Anthropic approval in the popup. We will finish the connection automatically.'
+        : 'Connect Claude Code with Anthropic OAuth. No manual code copy/paste is required.'
+
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="px-3 md:px-6 pt-3 md:pt-12 w-full !max-w-[560px]">
+            <SheetContent
+                className="px-3 md:px-6 pt-3 md:pt-12 w-full !max-w-[560px]"
+                accessibleTitle="Claude Code"
+            >
                 <SheetHeader className="p-0 gap-6 pb-4">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-x-2">
@@ -178,13 +241,13 @@ const ClaudeCodeSetting = ({
                     </p>
                     <p className="dark:text-white text-sm mt-3">
                         Enable Claude Code for autonomous code generation and
-                        review
+                        review.
                     </p>
                     <Button
                         className="h-[22px] bg-firefly dark:bg-sky-blue-2 text-sky-blue-2 dark:text-black gap-x-[6px] mt-4 text-xs rounded-full !font-normal"
                         onClick={() =>
                             window.open(
-                                `https://www.anthropic.com/claude/code`,
+                                'https://www.anthropic.com/claude/code',
                                 '_blank'
                             )
                         }
@@ -200,35 +263,30 @@ const ClaudeCodeSetting = ({
                         Credentials
                     </p>
 
-                    <Button
-                        type="button"
-                        className="h-10 rounded-xl text-sm mt-3 bg-[#191918] dark:bg-white text-white dark:text-black border-0 gap-x-2"
-                        onClick={handleLoginWithClaude}
-                    >
-                        <Icon name="claude" className="size-5" />
-                        Login with Claude
-                    </Button>
-
-                    <div className="space-y-2 relative mt-3">
-                        <Icon
-                            name="key-square"
-                            className={`absolute top-3 left-4 fill-black dark:fill-white ${authCode ? '' : 'opacity-30'}`}
-                        />
-                        <Input
-                            id="auth-code"
-                            className="pl-[56px]"
-                            placeholder="Paste the authorization code here"
-                            value={authCode}
-                            onChange={(e) => setAuthCode(e.target.value)}
-                        />
+                    <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4 space-y-3">
+                        <p className="text-sm dark:text-white/80">
+                            {connectionCopy}
+                        </p>
+                        <Button
+                            type="button"
+                            className="h-10 rounded-xl text-sm bg-[#191918] dark:bg-white text-white dark:text-black border-0 gap-x-2"
+                            onClick={() => void handleLoginWithClaude()}
+                            disabled={isConnectingClaude || isSavingSetting}
+                        >
+                            <Icon name="claude" className="size-5" />
+                            {oauthLoginId
+                                ? 'Restart Claude login'
+                                : 'Connect with Claude'}
+                        </Button>
                     </div>
+
                     {claudeCodeConfig?.updated_at && (
-                        <div className="mt-2 flex gap-x-2 items-center text-sm italic">
+                        <div className="mt-4 flex gap-x-2 items-center text-sm italic">
                             <span className="font-semibold">
                                 Latest update:
                             </span>
                             <span>
-                                {dayjs(claudeCodeConfig?.updated_at).format(
+                                {dayjs(claudeCodeConfig.updated_at).format(
                                     'DD/MM/YYYY -- hh:mmA'
                                 )}
                             </span>
@@ -245,10 +303,14 @@ const ClaudeCodeSetting = ({
                         </Button>
                         <Button
                             className="h-12 rounded-xl bg-sky-blue text-black text-base"
-                            disabled={isSavingSetting}
-                            onClick={() => handleSaveConfig()}
+                            onClick={() =>
+                                window.open(
+                                    'https://www.anthropic.com/claude/code',
+                                    '_blank'
+                                )
+                            }
                         >
-                            {isSavingSetting ? 'Saving...' : 'Save'}
+                            Learn More
                         </Button>
                     </div>
                 </div>

@@ -12,6 +12,7 @@ import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 
 import { chatService } from '@/services/chat.service'
+import { IS_LOCAL_DEPLOYMENT } from '@/constants/features'
 import {
     storybookService,
     type Storybook,
@@ -41,7 +42,10 @@ import {
     type VideoSettings,
     type VideoFrameReference
 } from '@/typings/agent'
-import { type AdvancedModeSettings, type ChatHistoryMessage } from '@/typings/chat'
+import {
+    type AdvancedModeSettings,
+    type ChatHistoryMessage
+} from '@/typings/chat'
 import { sessionService } from '@/services/session.service'
 import {
     type AgentStatusState,
@@ -221,7 +225,9 @@ function useChatProviderValue(): ChatContextValue {
     const currentMessageFileIds = useAppSelector(selectCurrentMessageFileIds)
     const uploadedFiles = useAppSelector(selectUploadedFiles) as UploadedFile[]
     const selectedModelId = useAppSelector(selectSelectedModel)
-    const chatMediaPreferenceFromStore = useAppSelector(selectChatMediaPreference)
+    const chatMediaPreferenceFromStore = useAppSelector(
+        selectChatMediaPreference
+    )
     const { i18n } = useTranslation()
     const navigate = useNavigate()
     const { getModelsForMediaType } = useMediaModels()
@@ -306,7 +312,12 @@ function useChatProviderValue(): ChatContextValue {
         }
 
         previousSessionIdRef.current = nextSessionId
-    }, [currentMessageFileIds.length, dispatch, state.sessionId, chatMediaPreferenceFromStore])
+    }, [
+        currentMessageFileIds.length,
+        dispatch,
+        state.sessionId,
+        chatMediaPreferenceFromStore
+    ])
 
     useEffect(() => {
         const currentSessionId = state.sessionId
@@ -326,8 +337,12 @@ function useChatProviderValue(): ChatContextValue {
         let cancelled = false
         const timerId = window.setTimeout(async () => {
             try {
-                const session = await sessionService.getSession(currentSessionId)
-                if (cancelled || activeSessionIdRef.current !== currentSessionId) {
+                const session =
+                    await sessionService.getSession(currentSessionId)
+                if (
+                    cancelled ||
+                    activeSessionIdRef.current !== currentSessionId
+                ) {
                     return
                 }
 
@@ -356,7 +371,10 @@ function useChatProviderValue(): ChatContextValue {
                         currentSessionId,
                         pollCount + 1
                     )
-                    console.error('Failed to refresh pending session title', error)
+                    console.error(
+                        'Failed to refresh pending session title',
+                        error
+                    )
                 }
             }
         }, 1500)
@@ -562,20 +580,23 @@ function useChatProviderValue(): ChatContextValue {
         }
     }, [currentMessageFileIds.length, dispatch, setChatState])
 
-    const stopStorybookPolling = useCallback((storybookId: string) => {
-        const entry = storybookPollingRef.current.get(storybookId)
-        if (entry) {
-            window.clearInterval(entry.timerId)
-            storybookPollingRef.current.delete(storybookId)
-        }
-        if (storybookPollingRef.current.size === 0) {
-            setChatState((prev) =>
-                prev.isStorybookPolling
-                    ? { ...prev, isStorybookPolling: false }
-                    : prev
-            )
-        }
-    }, [setChatState])
+    const stopStorybookPolling = useCallback(
+        (storybookId: string) => {
+            const entry = storybookPollingRef.current.get(storybookId)
+            if (entry) {
+                window.clearInterval(entry.timerId)
+                storybookPollingRef.current.delete(storybookId)
+            }
+            if (storybookPollingRef.current.size === 0) {
+                setChatState((prev) =>
+                    prev.isStorybookPolling
+                        ? { ...prev, isStorybookPolling: false }
+                        : prev
+                )
+            }
+        },
+        [setChatState]
+    )
 
     const stopOtherStorybookPolling = useCallback(
         (storybookId?: string) => {
@@ -646,10 +667,7 @@ function useChatProviderValue(): ChatContextValue {
                         )
                     }
                 } catch (error) {
-                    console.error(
-                        'Failed to poll storybook progress',
-                        error
-                    )
+                    console.error('Failed to poll storybook progress', error)
                 }
             }
 
@@ -699,7 +717,9 @@ function useChatProviderValue(): ChatContextValue {
         await Promise.all(
             entries.map(async ([storybookId, entry]) => {
                 try {
-                    await storybookService.cancelStorybookGeneration(storybookId)
+                    await storybookService.cancelStorybookGeneration(
+                        storybookId
+                    )
                     // Fetch final cancelled status and update the UI before
                     // stopping the polling so the error message is displayed.
                     const response =
@@ -753,7 +773,11 @@ function useChatProviderValue(): ChatContextValue {
                 stopStorybookPolling(storybookId)
             })
         )
-    }, [stopStorybookPolling, updateToolResultContent, updateToolResultContentByStorybookId])
+    }, [
+        stopStorybookPolling,
+        updateToolResultContent,
+        updateToolResultContentByStorybookId
+    ])
 
     const findToolCallIdForStorybook = useCallback(
         (messages: ChatMessage[], storybookId: string) => {
@@ -867,9 +891,10 @@ function useChatProviderValue(): ChatContextValue {
 
                 const storybookIdByToolCallId = new Map<string, string>()
                 ;(response.storybooks || []).forEach((storybook) => {
-                    const styleJson = storybook.style_json as
-                        | Record<string, unknown>
-                        | null
+                    const styleJson = storybook.style_json as Record<
+                        string,
+                        unknown
+                    > | null
                     const generation =
                         styleJson && typeof styleJson === 'object'
                             ? (styleJson.generation as
@@ -886,8 +911,7 @@ function useChatProviderValue(): ChatContextValue {
                 })
 
                 toolCallIds.forEach((toolCallId) => {
-                    const storybookId =
-                        storybookIdByToolCallId.get(toolCallId)
+                    const storybookId = storybookIdByToolCallId.get(toolCallId)
                     if (!storybookId) return
 
                     const existing = storybookTargets.get(storybookId)
@@ -931,7 +955,10 @@ function useChatProviderValue(): ChatContextValue {
                             storybookProgressRefreshRef.current.get(
                                 target.storybookId
                             ) || 0
-                        if (!options?.forceSync && Date.now() - lastRefresh < 3000) {
+                        if (
+                            !options?.forceSync &&
+                            Date.now() - lastRefresh < 3000
+                        ) {
                             return
                         }
                         storybookProgressRefreshRef.current.set(
@@ -987,10 +1014,7 @@ function useChatProviderValue(): ChatContextValue {
                     })
                 )
             } catch (error) {
-                console.error(
-                    'Failed to check storybook progress',
-                    error
-                )
+                console.error('Failed to check storybook progress', error)
             }
         },
         [
@@ -1040,37 +1064,44 @@ function useChatProviderValue(): ChatContextValue {
                 const historyMessages = chatHistory.messages ?? []
 
                 // Convert ChatHistoryMessage[] to ChatMessage[] directly
-                const messages: ChatMessage[] = historyMessages.map((historyMsg) => {
-                    // Extract text content from parts
-                    const textContent = historyMsg.content
-                        .filter(
-                            (
-                                part
-                            ): part is Extract<typeof part, { type: 'text' }> =>
-                                part.type === 'text'
-                        )
-                        .map((part) => part.text)
-                        .join('')
+                const messages: ChatMessage[] = historyMessages.map(
+                    (historyMsg) => {
+                        // Extract text content from parts
+                        const textContent = historyMsg.content
+                            .filter(
+                                (
+                                    part
+                                ): part is Extract<
+                                    typeof part,
+                                    { type: 'text' }
+                                > => part.type === 'text'
+                            )
+                            .map((part) => part.text)
+                            .join('')
 
-                    // Restore video frames from metadata if available
-                    const mediaVideoFrames = historyMsg.metadata?.media?.video_frames
-                    const videoFrames = Array.isArray(mediaVideoFrames) && mediaVideoFrames.length > 0
-                        ? mediaVideoFrames as VideoFrameReference[]
-                        : undefined
+                        // Restore video frames from metadata if available
+                        const mediaVideoFrames =
+                            historyMsg.metadata?.media?.video_frames
+                        const videoFrames =
+                            Array.isArray(mediaVideoFrames) &&
+                            mediaVideoFrames.length > 0
+                                ? (mediaVideoFrames as VideoFrameReference[])
+                                : undefined
 
-                    return {
-                        id: historyMsg.id,
-                        role: historyMsg.role,
-                        content: textContent,
-                        createdAt: historyMsg.created_at,
-                        model: historyMsg.model,
-                        parts: historyMsg.content,
-                        files: historyMsg.files,
-                        finish_reason: historyMsg.finish_reason,
-                        metadata: historyMsg.metadata,
-                        ...(videoFrames ? { videoFrames } : {})
+                        return {
+                            id: historyMsg.id,
+                            role: historyMsg.role,
+                            content: textContent,
+                            createdAt: historyMsg.created_at,
+                            model: historyMsg.model,
+                            parts: historyMsg.content,
+                            files: historyMsg.files,
+                            finish_reason: historyMsg.finish_reason,
+                            metadata: historyMsg.metadata,
+                            ...(videoFrames ? { videoFrames } : {})
+                        }
                     }
-                })
+                )
 
                 streamingMessageIdRef.current = null
                 activeSessionIdRef.current = activeSessionId
@@ -1117,7 +1148,8 @@ function useChatProviderValue(): ChatContextValue {
                         (mediaPrefs.type as ChatMediaType) ?? 'image'
 
                     // Select the appropriate models array based on preferred type
-                    const mediaModelsArray = getModelsForMediaType(preferredType)
+                    const mediaModelsArray =
+                        getModelsForMediaType(preferredType)
 
                     const matchedModel = mediaModelsArray.find(
                         (model) =>
@@ -1181,9 +1213,7 @@ function useChatProviderValue(): ChatContextValue {
                             | undefined,
                         language: historyLanguage,
                         language_source: inferredLanguageSource,
-                        genre: mediaPrefs.genre as
-                            | StorybookGenre
-                            | undefined,
+                        genre: mediaPrefs.genre as StorybookGenre | undefined,
                         manga_layout: mediaPrefs.manga_layout as
                             | boolean
                             | undefined,
@@ -1202,7 +1232,10 @@ function useChatProviderValue(): ChatContextValue {
                     }
                 }
 
-                if (advancedModeSettings?.enabled && mediaPrefsToApply.type === 'image') {
+                if (
+                    advancedModeSettings?.enabled &&
+                    mediaPrefsToApply.type === 'image'
+                ) {
                     mediaPrefsToApply = {
                         ...mediaPrefsToApply,
                         enabled: true,
@@ -1218,8 +1251,9 @@ function useChatProviderValue(): ChatContextValue {
                 }
 
                 // Don't override a fresh mini tool selection if hydration finishes after the user picked files
-                const hasActiveMiniToolSelection =
-                    Boolean(chatMediaPreferenceRef.current?.mini_tools)
+                const hasActiveMiniToolSelection = Boolean(
+                    chatMediaPreferenceRef.current?.mini_tools
+                )
                 if (!hasActiveMiniToolSelection) {
                     dispatch(setChatMediaPreference(mediaPrefsToApply))
                 }
@@ -1269,7 +1303,8 @@ function useChatProviderValue(): ChatContextValue {
     const loadMoreMessages = useCallback(async () => {
         const currentSessionId = activeSessionIdRef.current
         if (!currentSessionId) return
-        if (stateRef.current.isLoadingMore || !stateRef.current.hasMoreMessages) return
+        if (stateRef.current.isLoadingMore || !stateRef.current.hasMoreMessages)
+            return
 
         const currentMessages = stateRef.current.messages
         if (currentMessages.length === 0) return
@@ -1280,46 +1315,51 @@ function useChatProviderValue(): ChatContextValue {
         setChatState((prev) => ({ ...prev, isLoadingMore: true }))
 
         try {
-            const chatHistory = await chatService.getChatHistory(currentSessionId, {
-                before: oldestMessageId,
-                limit: 50
-            })
+            const chatHistory = await chatService.getChatHistory(
+                currentSessionId,
+                {
+                    before: oldestMessageId,
+                    limit: 50
+                }
+            )
 
             // Discard if session changed during fetch
             if (activeSessionIdRef.current !== currentSessionId) return
 
-            const olderMessages: ChatMessage[] = (chatHistory.messages ?? []).map(
-                (historyMsg) => {
-                    const textContent = historyMsg.content
-                        .filter(
-                            (
-                                part
-                            ): part is Extract<typeof part, { type: 'text' }> =>
-                                part.type === 'text'
-                        )
-                        .map((part) => part.text)
-                        .join('')
+            const olderMessages: ChatMessage[] = (
+                chatHistory.messages ?? []
+            ).map((historyMsg) => {
+                const textContent = historyMsg.content
+                    .filter(
+                        (
+                            part
+                        ): part is Extract<typeof part, { type: 'text' }> =>
+                            part.type === 'text'
+                    )
+                    .map((part) => part.text)
+                    .join('')
 
-                    const mediaVideoFrames = historyMsg.metadata?.media?.video_frames
-                    const videoFrames =
-                        Array.isArray(mediaVideoFrames) && mediaVideoFrames.length > 0
-                            ? (mediaVideoFrames as VideoFrameReference[])
-                            : undefined
+                const mediaVideoFrames =
+                    historyMsg.metadata?.media?.video_frames
+                const videoFrames =
+                    Array.isArray(mediaVideoFrames) &&
+                    mediaVideoFrames.length > 0
+                        ? (mediaVideoFrames as VideoFrameReference[])
+                        : undefined
 
-                    return {
-                        id: historyMsg.id,
-                        role: historyMsg.role,
-                        content: textContent,
-                        createdAt: historyMsg.created_at,
-                        model: historyMsg.model,
-                        parts: historyMsg.content,
-                        files: historyMsg.files,
-                        finish_reason: historyMsg.finish_reason,
-                        metadata: historyMsg.metadata,
-                        ...(videoFrames ? { videoFrames } : {})
-                    }
+                return {
+                    id: historyMsg.id,
+                    role: historyMsg.role,
+                    content: textContent,
+                    createdAt: historyMsg.created_at,
+                    model: historyMsg.model,
+                    parts: historyMsg.content,
+                    files: historyMsg.files,
+                    finish_reason: historyMsg.finish_reason,
+                    metadata: historyMsg.metadata,
+                    ...(videoFrames ? { videoFrames } : {})
                 }
-            )
+            })
 
             setChatState((prev) => ({
                 ...prev,
@@ -1366,9 +1406,13 @@ function useChatProviderValue(): ChatContextValue {
 
         if (storybookProgressCheckedRef.current !== state.sessionId) {
             storybookProgressCheckedRef.current = state.sessionId
-            void checkSessionStorybookProgress(state.sessionId, state.messages, {
-                forceSync: true
-            })
+            void checkSessionStorybookProgress(
+                state.sessionId,
+                state.messages,
+                {
+                    forceSync: true
+                }
+            )
         }
     }, [
         checkSessionStorybookProgress,
@@ -1390,16 +1434,24 @@ function useChatProviderValue(): ChatContextValue {
             const parts = state.messages[i].parts ?? []
             for (let j = parts.length - 1; j >= 0; j--) {
                 const part = parts[j]
-                if (part.type === 'tool_call' && part.name === 'generate_storybook') {
+                if (
+                    part.type === 'tool_call' &&
+                    part.name === 'generate_storybook'
+                ) {
                     hasStorybook = true
                     hasGenerating = true
                     break
                 }
-                if (part.type !== 'tool_result' || part.name !== 'generate_storybook') {
+                if (
+                    part.type !== 'tool_result' ||
+                    part.name !== 'generate_storybook'
+                ) {
                     continue
                 }
                 hasStorybook = true
-                const parsed = parseStorybookPayload(part.output ?? part.content)
+                const parsed = parseStorybookPayload(
+                    part.output ?? part.content
+                )
                 if (parsed?.type === 'storybook_progress') {
                     if (!parsed.status || parsed.status === 'generating') {
                         hasGenerating = true
@@ -1538,10 +1590,7 @@ function useChatProviderValue(): ChatContextValue {
     )
 
     const sendMessage = useCallback(
-        async (
-            overrideQuestion?: string,
-            overrideFileIds?: string[]
-        ) => {
+        async (overrideQuestion?: string, overrideFileIds?: string[]) => {
             const rawQuestion =
                 typeof overrideQuestion === 'string'
                     ? overrideQuestion
@@ -1615,9 +1664,7 @@ function useChatProviderValue(): ChatContextValue {
                     // Since folders store their ID directly and effectiveFileIds contains individual file IDs,
                     // we need different logic
                     // Actually, let's just check if any of the effectiveFileIds match this file
-                    const shouldInclude = effectiveFileIds.includes(
-                        file.id
-                    )
+                    const shouldInclude = effectiveFileIds.includes(file.id)
                     if (shouldInclude) {
                         attachments.push(file)
                         processedFolderIds.add(file.id)
@@ -1699,7 +1746,9 @@ function useChatProviderValue(): ChatContextValue {
                             createdAt,
                             model: selectedModelId || '',
                             parts: [],
-                            ...(mediaMetadata ? { metadata: mediaMetadata } : {})
+                            ...(mediaMetadata
+                                ? { metadata: mediaMetadata }
+                                : {})
                         }
                     ],
                     chatStatus: 'running',
@@ -2014,11 +2063,7 @@ function useChatProviderValue(): ChatContextValue {
                                 isWaitingForNextEvent: true
                             }))
                         },
-                        onToolProgress: ({
-                            tool_call_id,
-                            name,
-                            output
-                        }) => {
+                        onToolProgress: ({ tool_call_id, name, output }) => {
                             // Update the tool result part with progress data
                             // This allows the UI to show storybook pages as they are generated
                             updateMessagePart(`result-${tool_call_id}`, () => ({
@@ -2086,8 +2131,7 @@ function useChatProviderValue(): ChatContextValue {
                                         model_name ||
                                         existing?.model_name ||
                                         model_id,
-                                    content:
-                                        (existing?.content || '') + delta,
+                                    content: (existing?.content || '') + delta,
                                     status: 'streaming'
                                 }))
                             } else if (status === 'complete') {
@@ -2100,8 +2144,7 @@ function useChatProviderValue(): ChatContextValue {
                                         model_name ||
                                         existing?.model_name ||
                                         model_id,
-                                    content:
-                                        existing?.content || content || '',
+                                    content: existing?.content || content || '',
                                     status: 'completed'
                                 }))
                             } else if (status === 'error') {
@@ -2116,8 +2159,7 @@ function useChatProviderValue(): ChatContextValue {
                                         model_id,
                                     content: existing?.content || '',
                                     status: 'error',
-                                    error_message:
-                                        error || 'Unknown error'
+                                    error_message: error || 'Unknown error'
                                 }))
                             }
                         },
@@ -2146,8 +2188,7 @@ function useChatProviderValue(): ChatContextValue {
                                         model_id ||
                                         existing?.synthesis_model_id ||
                                         '',
-                                    content:
-                                        (existing?.content || '') + delta
+                                    content: (existing?.content || '') + delta
                                 }))
                             } else if (status === 'complete') {
                                 updateMessagePart(partId, (existing) => ({
@@ -2158,8 +2199,7 @@ function useChatProviderValue(): ChatContextValue {
                                         model_id ||
                                         existing?.synthesis_model_id ||
                                         '',
-                                    content:
-                                        existing?.content || content || ''
+                                    content: existing?.content || content || ''
                                 }))
                             } else if (status === 'error') {
                                 updateMessagePart(partId, () => ({
@@ -2167,8 +2207,7 @@ function useChatProviderValue(): ChatContextValue {
                                     id: partId,
                                     synthesis_model_id: model_id || '',
                                     content: '',
-                                    error_message:
-                                        error || 'Synthesis failed'
+                                    error_message: error || 'Synthesis failed'
                                 }))
                             }
                         },
@@ -2234,9 +2273,15 @@ function useChatProviderValue(): ChatContextValue {
                         onError: (message, code) => {
                             if (code === 'insufficient_credits') {
                                 toast.warning(
-                                    'You have run out of credits. Redirecting to upgrade your plan...'
+                                    IS_LOCAL_DEPLOYMENT
+                                        ? 'You have run out of local usage budget. Opening usage details...'
+                                        : 'You have run out of credits. Redirecting to upgrade your plan...'
                                 )
-                                navigate('/settings/subscription')
+                                navigate(
+                                    IS_LOCAL_DEPLOYMENT
+                                        ? '/settings/usage'
+                                        : '/settings/subscription'
+                                )
                             } else if (code === 'anthropic_image_too_large') {
                                 toast.error(
                                     'Anthropic models cannot process images over 5 MB. Please switch to a different model (e.g. OpenAI) or upload a smaller image.'
@@ -2386,7 +2431,13 @@ function useChatProviderValue(): ChatContextValue {
                 }))
             }
         },
-        [dispatch, stopActiveStream, setChatState, sendMessage, hydrateSessionHistory]
+        [
+            dispatch,
+            stopActiveStream,
+            setChatState,
+            sendMessage,
+            hydrateSessionHistory
+        ]
     )
 
     useEffect(() => {

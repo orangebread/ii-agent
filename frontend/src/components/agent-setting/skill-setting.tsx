@@ -306,7 +306,7 @@ const SkillSetting = ({ className }: SkillSettingProps) => {
                         {customSkills.length === 0 && (
                             <div className="mt-8 py-8 text-center border-2 border-dashed border-firefly/20 dark:border-white/20 rounded-2xl">
                                 <Icon
-                                    name="magic-star"
+                                    name="ai-magic"
                                     className="size-12 mx-auto mb-4 fill-firefly/30 dark:fill-white/30"
                                 />
                                 <p className="text-firefly/60 dark:text-white/60 text-sm">

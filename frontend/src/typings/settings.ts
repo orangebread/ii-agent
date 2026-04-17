@@ -120,6 +120,11 @@ export interface CodexOpenAIDevicePollResponse {
     error?: string
 }
 
+export interface ClaudeCodeOAuthStartResponse {
+    login_id: string
+    authorization_url: string
+}
+
 // Skills types
 export interface ISkill {
     id: string

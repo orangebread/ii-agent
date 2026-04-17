@@ -24,6 +24,7 @@ import { SUBSCRIPTION_PLANS } from '@/constants/subscription'
 // import { GitHubConnection } from './github-connection'
 import { SupabaseConnection } from '@/components/project/supabase-connection'
 import { RevenueCatConnection } from './revenuecat-connection'
+import { SHOW_BILLING_UI } from '@/constants/features'
 import {
     AlertDialog,
     AlertDialogAction,
@@ -130,7 +131,7 @@ const AccountTab = () => {
                 <RevenueCatConnection />
             </div>
 
-            {plan !== SubscriptionPlan.Free && (
+            {SHOW_BILLING_UI && plan !== SubscriptionPlan.Free && (
                 <div className="pt-4 md:pt-6 border-t border-black/30 dark:border-white/30">
                     <h2 className="text-[18px] font-semibold mb-2">
                         {t('settings.account.paymentInvoices')}
@@ -149,7 +150,7 @@ const AccountTab = () => {
                 </div>
             )}
 
-            {plan !== SubscriptionPlan.Free && (
+            {SHOW_BILLING_UI && plan !== SubscriptionPlan.Free && (
                 <div className="pt-4 md:pt-6 border-t border-black/30 dark:border-white/30">
                     <h2 className="text-[18px] font-semibold mb-2">
                         {t('settings.account.planTitle', {

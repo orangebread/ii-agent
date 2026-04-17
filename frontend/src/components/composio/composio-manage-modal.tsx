@@ -113,7 +113,16 @@ export function ComposioManageModal({
     return (
         <>
             <Sheet open={open} onOpenChange={onOpenChange}>
-                <SheetContent className="w-full sm:w-[60vw] lg:w-[60vw] xl:w-[60vw] max-w-none sm:max-w-none p-0 flex flex-col h-full !bg-white border-gray-200">
+                <SheetContent
+                    className="w-full sm:w-[60vw] lg:w-[60vw] xl:w-[60vw] max-w-none sm:max-w-none p-0 flex flex-col h-full !bg-white border-gray-200"
+                    accessibleTitle={profile.toolkit_name}
+                    accessibleDescription={t(
+                        'composio.manageModal.toolsDescription',
+                        {
+                            appName: profile.toolkit_name
+                        }
+                    )}
+                >
                     {/* Header */}
                     <div className="px-3 md:px-8 pt-8 pb-6 border-b border-gray-100 flex items-start justify-between">
                         <div className="flex items-start gap-4">

@@ -187,7 +187,10 @@ const ShareConversation = ({
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
-            <SheetContent className="!left-1/2 !top-1/2 !right-auto !bottom-auto !h-auto !max-h-[90vh] !w-[92vw] !max-w-[650px] !-translate-x-1/2 !-translate-y-1/2 !rounded-2xl !p-0 shadow-2xl !bg-white !text-slate-900 dark:!bg-white dark:!text-slate-900">
+            <SheetContent
+                className="!left-1/2 !top-1/2 !right-auto !bottom-auto !h-auto !max-h-[90vh] !w-[92vw] !max-w-[650px] !-translate-x-1/2 !-translate-y-1/2 !rounded-2xl !p-0 shadow-2xl !bg-white !text-slate-900 dark:!bg-white dark:!text-slate-900"
+                accessibleTitle={t('share.title')}
+            >
                 <SheetHeader className="px-6 pt-6 gap-1 pb-4 text-slate-900">
                     <div className="flex items-center justify-between">
                         <p className="text-lg font-semibold text-slate-900">

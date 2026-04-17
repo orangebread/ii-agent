@@ -224,6 +224,7 @@ const SearchHistory = ({ className, isMobile }: SearchHistoryProps) => {
             <SheetContent
                 side="left"
                 className="p-3 md:px-6 md:pt-12 w-full !max-w-[560px]"
+                accessibleTitle={t('searchHistory.title')}
             >
                 <SheetHeader className="p-0 gap-6 md:pb-6">
                     <div className="flex items-center justify-between">

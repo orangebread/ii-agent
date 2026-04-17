@@ -50,7 +50,14 @@ const AgentSetting = ({ isOpen, onOpenChange }: AgentSettingProps) => {
 
     return (
         <Sheet open={isOpen} onOpenChange={onOpenChange}>
-            <SheetContent className="pt-0 md:pt-12 w-full !max-w-[560px]">
+            <SheetContent
+                className="pt-0 md:pt-12 w-full !max-w-[560px]"
+                accessibleTitle={
+                    questionMode === QUESTION_MODE.AGENT
+                        ? t('agentSetting.title.agent')
+                        : t('agentSetting.title.chat')
+                }
+            >
                 <SheetHeader className="px-3 md:px-6 gap-6 pb-4">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-x-3">

@@ -18,6 +18,7 @@ import {
 } from './ui/table'
 import CreditTooltip from './credit-tooltip'
 import { Icon } from './ui/icon'
+import { IS_LOCAL_DEPLOYMENT } from '@/constants/features'
 
 interface CreditUsageProps {
     className?: string
@@ -30,7 +31,9 @@ const CreditUsage = ({ className, perPage = 20 }: CreditUsageProps) => {
     const [page, setPage] = useState(1)
 
     // Use RTK Query hooks instead of Redux dispatch and selectors
-    const { data: balanceData } = useGetCreditBalanceQuery()
+    const { data: balanceData } = useGetCreditBalanceQuery(undefined, {
+        skip: IS_LOCAL_DEPLOYMENT
+    })
     const { data: usage, isLoading: loading } = useGetCreditUsageQuery({
         page,
         perPage
@@ -66,18 +69,20 @@ const CreditUsage = ({ className, perPage = 20 }: CreditUsageProps) => {
 
     return (
         <div className={cn('rounded-2xl overflow-x-hidden', className)}>
-            <div className="flex mb-2">
-                <CreditTooltip
-                    credits={availableCredit}
-                    bonusCredits={bonusCredit}
-                    hideViewUsage
-                >
-                    <div className="text-xs font-semibold text-black bg-yellow px-4 py-1 rounded-4xl flex items-center gap-x-[6px] cursor-default">
-                        <Icon name="coin" className="fill-firefly" />
-                        <p>{formatCreditBalance(totalCredit)}</p>
-                    </div>
-                </CreditTooltip>
-            </div>
+            {!IS_LOCAL_DEPLOYMENT && (
+                <div className="flex mb-2">
+                    <CreditTooltip
+                        credits={availableCredit}
+                        bonusCredits={bonusCredit}
+                        hideViewUsage
+                    >
+                        <div className="text-xs font-semibold text-black bg-yellow px-4 py-1 rounded-4xl flex items-center gap-x-[6px] cursor-default">
+                            <Icon name="coin" className="fill-firefly" />
+                            <p>{formatCreditBalance(totalCredit)}</p>
+                        </div>
+                    </CreditTooltip>
+                </div>
+            )}
             <div className="p-0">
                 <Table>
                     <TableHeader className="hidden md:table-header-group overflow-hidden">
@@ -88,22 +93,30 @@ const CreditUsage = ({ className, perPage = 20 }: CreditUsageProps) => {
                             <TableHead className="py-4 text-lg w-[25%]">
                                 {t('credit.table.date')}
                             </TableHead>
-                            <TableHead className="py-4 text-lg text-right w-[15%]">
-                                {t('credit.table.creditsChange')}
-                            </TableHead>
+                            {!IS_LOCAL_DEPLOYMENT && (
+                                <TableHead className="py-4 text-lg text-right w-[15%]">
+                                    {t('credit.table.creditsChange')}
+                                </TableHead>
+                            )}
                         </TableRow>
                     </TableHeader>
                     <TableBody>
                         {loading && (
                             <TableRow>
-                                <TableCell className="py-6 pl-6" colSpan={3}>
+                                <TableCell
+                                    className="py-6 pl-6"
+                                    colSpan={IS_LOCAL_DEPLOYMENT ? 2 : 3}
+                                >
                                     {t('common.loading')}
                                 </TableCell>
                             </TableRow>
                         )}
                         {!loading && usage?.sessions?.length === 0 && (
                             <TableRow>
-                                <TableCell className="py-6 pl-6" colSpan={3}>
+                                <TableCell
+                                    className="py-6 pl-6"
+                                    colSpan={IS_LOCAL_DEPLOYMENT ? 2 : 3}
+                                >
                                     {t('credit.noRecords')}
                                 </TableCell>
                             </TableRow>
@@ -139,15 +152,17 @@ const CreditUsage = ({ className, perPage = 20 }: CreditUsageProps) => {
                                                 .format('DD MMM YYYY')}
                                         </span>
                                     </TableCell>
-                                    <TableCell
-                                        className={cn(
-                                            'pt-4 text-right text-sm w-[15%]'
-                                        )}
-                                    >
-                                        {s.credits > 0
-                                            ? `+${formatCredit(s.credits)}`
-                                            : formatCredit(s.credits)}
-                                    </TableCell>
+                                    {!IS_LOCAL_DEPLOYMENT && (
+                                        <TableCell
+                                            className={cn(
+                                                'pt-4 text-right text-sm w-[15%]'
+                                            )}
+                                        >
+                                            {s.credits > 0
+                                                ? `+${formatCredit(s.credits)}`
+                                                : formatCredit(s.credits)}
+                                        </TableCell>
+                                    )}
                                 </TableRow>
                             ))}
                     </TableBody>

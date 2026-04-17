@@ -15,6 +15,7 @@ import { authService } from '@/services/auth.service'
 import { setUser } from '@/state/slice/user'
 import { useAppDispatch } from '@/state'
 import { useIsSageTheme } from '@/hooks/use-is-sage-theme'
+import { IS_LOCAL_DEPLOYMENT, SHOW_BILLING_UI } from '@/constants/features'
 
 enum SettingTab {
     GENERAL = 'general',
@@ -44,9 +45,15 @@ const Settings = () => {
             key: SettingTab.DATA_CONTROLS,
             label: t('settings.tabs.dataControls')
         },
-        { key: SettingTab.USAGE, label: t('settings.tabs.usage') },
-        { key: SettingTab.SUBSCRIPTION, label: t('settings.tabs.subscription') }
+        { key: SettingTab.USAGE, label: t('settings.tabs.usage') }
     ]
+
+    if (SHOW_BILLING_UI) {
+        tabs.push({
+            key: SettingTab.SUBSCRIPTION,
+            label: t('settings.tabs.subscription')
+        })
+    }
 
     const handleBack = () => {
         navigate('/')
@@ -63,7 +70,7 @@ const Settings = () => {
             case SettingTab.USAGE:
                 return <CreditUsage />
             case SettingTab.SUBSCRIPTION:
-                return <SubscriptionTab />
+                return SHOW_BILLING_UI ? <SubscriptionTab /> : <CreditUsage />
             default:
                 return (
                     <div className="text-center py-8 text-muted-foreground">
@@ -74,19 +81,25 @@ const Settings = () => {
     }
 
     useEffect(() => {
+        if (IS_LOCAL_DEPLOYMENT && tab === SettingTab.SUBSCRIPTION) {
+            setActiveTab(SettingTab.USAGE)
+            navigate('/settings/usage', { replace: true })
+            return
+        }
+
         if (tab && Object.values(SettingTab).includes(tab as SettingTab)) {
             setActiveTab(tab as SettingTab)
         }
-    }, [tab])
+    }, [navigate, tab])
 
     useEffect(() => {
         ;(async () => {
-            if (tab === SettingTab.SUBSCRIPTION) {
+            if (SHOW_BILLING_UI && tab === SettingTab.SUBSCRIPTION) {
                 const userRes = await authService.getCurrentUser()
                 dispatch(setUser(userRes))
             }
         })()
-    }, [tab])
+    }, [dispatch, tab])
 
     return (
         <div className="p-3 md:p-0 min-h-screen bg-background">
