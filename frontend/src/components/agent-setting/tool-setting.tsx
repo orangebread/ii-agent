@@ -89,15 +89,21 @@ const ToolSetting = ({ className }: ToolSettingProps) => {
         try {
             const claudeCodeSettings =
                 await settingsService.getClaudeCodeSettings()
-            const isActive = claudeCodeSettings?.is_active || false
+            const isActive = Boolean(claudeCodeSettings?.is_active)
+            const hasAuth = Boolean(claudeCodeSettings?.metadata?.has_auth)
 
             // Update Redux state with backend state
-            dispatch(setClaudeCodeToolsStatus(isActive))
+            dispatch(setClaudeCodeToolsStatus(isActive && hasAuth))
             dispatch(
                 setClaudeCodeConfig({
                     id: claudeCodeSettings?.id || '',
                     is_active: isActive,
-                    updated_at: claudeCodeSettings?.updated_at || ''
+                    updated_at: claudeCodeSettings?.updated_at || '',
+                    has_auth: hasAuth,
+                    auth_status: claudeCodeSettings?.metadata?.auth_status,
+                    needs_reauth: Boolean(
+                        claudeCodeSettings?.metadata?.needs_reauth
+                    )
                 })
             )
         } catch (error) {
@@ -105,6 +111,16 @@ const ToolSetting = ({ className }: ToolSettingProps) => {
 
             // Update Redux state on error
             dispatch(setClaudeCodeToolsStatus(false))
+            dispatch(
+                setClaudeCodeConfig({
+                    id: '',
+                    is_active: false,
+                    updated_at: '',
+                    has_auth: false,
+                    auth_status: undefined,
+                    needs_reauth: false
+                })
+            )
         }
     }, [dispatch])
 
@@ -280,10 +296,10 @@ const ToolSetting = ({ className }: ToolSettingProps) => {
             // When toggling on, check if Claude Code is configured
             const claudeCodeSettings =
                 await settingsService.getClaudeCodeSettings()
-            if (
-                !claudeCodeSettings ||
-                !claudeCodeSettings.metadata?.auth_json
-            ) {
+            const hasClaudeCodeAuth = Boolean(
+                claudeCodeSettings?.metadata?.has_auth
+            )
+            if (!claudeCodeSettings || !hasClaudeCodeAuth) {
                 // Navigate to Claude Code settings if not configured
                 setClaudeCodeSettingTabOpen(true)
                 return false // Don't enable the toggle since no content exists

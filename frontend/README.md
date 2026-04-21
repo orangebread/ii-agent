@@ -158,6 +158,23 @@ VITE_STRIPE_PUBLISHABLE_KEY=<stripe-publishable-key>
 2. **Windows build errors**: Install Visual Studio Build Tools
 3. **Linux dependencies**: Install required system libraries as per Tauri docs
 
+### Codex Desktop on macOS
+
+If you launch the frontend commands from Codex Desktop, the shell may use
+`/Applications/Codex.app/Contents/Resources/node`. That runtime cannot load
+Rollup's native addon, so Vite fails with a misleading optional dependency
+error.
+
+Use a workspace or system Node.js binary instead:
+
+```bash
+PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/opt/homebrew/bin:$PATH" pnpm build
+PATH="$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:/opt/homebrew/bin:$PATH" pnpm dev
+```
+
+The frontend scripts now fail fast with a targeted error when they detect the
+unsupported Codex app-bundled Node.js runtime.
+
 ### Debug Mode
 
 Enable debug logging by setting:

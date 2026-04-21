@@ -57,6 +57,18 @@ class MCPSettingRepository(BaseRepository[MCPSetting]):
         result = await db.execute(query)
         return list(result.scalars().all())
 
+    async def has_provider_connection_reference(
+        self,
+        db: AsyncSession,
+        provider_connection_id: uuid.UUID | str,
+    ) -> bool:
+        result = await db.execute(
+            select(MCPSetting.id)
+            .where(MCPSetting.provider_connection_id == provider_connection_id)
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def list_by_user(
         self,
         db: AsyncSession,

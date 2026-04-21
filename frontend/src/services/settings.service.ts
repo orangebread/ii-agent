@@ -140,6 +140,10 @@ class SettingsService {
         return response.data
     }
 
+    async deleteClaudeCodeSettings(): Promise<void> {
+        await axiosInstance.delete('/v1/user-settings/mcp/claude-code')
+    }
+
     async startClaudeCodeOAuth(payload: {
         redirect_uri: string
     }): Promise<ClaudeCodeOAuthStartResponse> {

@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import base64
-import json
 import hashlib
+import json
 import secrets
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
+from fastapi.encoders import jsonable_encoder
 from itsdangerous import BadSignature, URLSafeSerializer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,16 +76,14 @@ class MCPSettingService:
             user_id=user_id,
             provider_connection_id=_extract_provider_connection_id(mcp_setting_in.metadata),
             mcp_config=mcp_setting_in.mcp_config.model_dump(exclude_none=True),
-            mcp_metadata=None
-            if not mcp_setting_in.metadata
-            else mcp_setting_in.metadata.model_dump(exclude_none=True),
+            mcp_metadata=_metadata_to_storage_payload(mcp_setting_in.metadata),
             is_active=True,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc),
         )
 
         created = await self._repo.create(db, new_setting)
-        return _to_mcp_setting_info(created)
+        return await self._serialize_setting_info(db, setting=created)
 
     async def update_mcp_settings(
         self,
@@ -102,7 +101,7 @@ class MCPSettingService:
         if setting_update.mcp_config is not None:
             setting.mcp_config = setting_update.mcp_config.model_dump(exclude_none=True)
         if setting_update.metadata is not None:
-            setting.mcp_metadata = setting_update.metadata.model_dump(exclude_none=True)
+            setting.mcp_metadata = _metadata_to_storage_payload(setting_update.metadata)
             setting.provider_connection_id = _extract_provider_connection_id(
                 setting_update.metadata
             )
@@ -111,7 +110,7 @@ class MCPSettingService:
 
         setting.updated_at = datetime.now(timezone.utc)
         updated = await self._repo.update(db, setting)
-        return _to_mcp_setting_info(updated)
+        return await self._serialize_setting_info(db, setting=updated)
 
     async def get_mcp_settings(
         self, db: AsyncSession, *, setting_id: str, user_id: uuid.UUID
@@ -120,7 +119,7 @@ class MCPSettingService:
         setting = await self._repo.get_by_id_and_user(db, setting_id, user_id)
         if not setting:
             raise MCPSettingNotFoundError(f"MCP setting {setting_id} not found or access denied")
-        return _to_mcp_setting_info(setting)
+        return await self._serialize_setting_info(db, setting=setting)
 
     async def list_mcp_settings(
         self,
@@ -135,7 +134,14 @@ class MCPSettingService:
         settings = await self._repo.list_by_user(
             db, user_id, only_active=only_active, no_metadata=no_metadata
         )
-        settings_list = [_to_mcp_setting_info(s, include_secrets=include_secrets) for s in settings]
+        settings_list = [
+            await self._serialize_setting_info(
+                db,
+                setting=s,
+                include_secrets=include_secrets,
+            )
+            for s in settings
+        ]
         return MCPSettingList(settings=settings_list)
 
     async def delete_mcp_settings(
@@ -145,6 +151,7 @@ class MCPSettingService:
         setting = await self._repo.get_by_id_and_user(db, setting_id, user_id)
         if not setting:
             return False
+        provider_connection_id = setting.provider_connection_id
 
         await self._clear_runtime_selection_references(
             db,
@@ -152,6 +159,11 @@ class MCPSettingService:
             setting_id=setting.id,
         )
         await self._repo.delete(db, setting)
+        await self._delete_orphaned_provider_connection(
+            db,
+            user_id=user_id,
+            provider_connection_id=provider_connection_id,
+        )
         return True
 
     async def get_codex_setting(
@@ -165,7 +177,11 @@ class MCPSettingService:
         setting = await self._repo.get_by_user_and_tool_type(db, user_id, "codex")
         if not setting:
             return None
-        return _to_mcp_setting_info(setting, include_secrets=include_secrets)
+        return await self._serialize_setting_info(
+            db,
+            setting=setting,
+            include_secrets=include_secrets,
+        )
 
     async def get_claude_code_setting(
         self, db: AsyncSession, *, user_id: uuid.UUID
@@ -174,7 +190,19 @@ class MCPSettingService:
         setting = await self._repo.get_by_user_and_tool_type(db, user_id, "claude_code")
         if not setting:
             return None
-        return _to_mcp_setting_info(setting)
+        return await self._serialize_setting_info(db, setting=setting)
+
+    async def delete_claude_code_setting(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+    ) -> bool:
+        """Delete the user's Claude Code MCP setting and its orphaned credentials."""
+        setting = await self._repo.get_by_user_and_tool_type(db, user_id, "claude_code")
+        if not setting:
+            return False
+        return await self.delete_mcp_settings(db, setting_id=setting.id, user_id=user_id)
 
     async def get_default_selection_info(
         self,
@@ -398,7 +426,10 @@ class MCPSettingService:
         )
         if self._user_repo is not None:
             await self.set_default_runtime_setting(db, user_id=user_id, setting_id=setting.id)
-        return setting
+        refreshed_setting = await self._repo.get_by_id_and_user(db, setting.id, user_id)
+        if refreshed_setting is None:
+            raise MCPSettingNotFoundError(f"MCP setting {setting.id} not found or access denied")
+        return await self._serialize_setting_info(db, setting=refreshed_setting)
 
     async def start_codex_openai_device_oauth(
         self,
@@ -478,17 +509,18 @@ class MCPSettingService:
             user_id=str(user_id),
             verifier=verifier,
             redirect_uri=sanitized_redirect_uri,
+            oauth_redirect_uri=self._config.mcp.anthropic_oauth_redirect_uri,
         )
         auth_params = urlencode(
             {
                 "code": "true",
                 "client_id": self._config.mcp.anthropic_oauth_client_id,
                 "response_type": "code",
-                "redirect_uri": sanitized_redirect_uri,
+                "redirect_uri": self._config.mcp.anthropic_oauth_redirect_uri,
                 "scope": CLAUDE_CODE_OAUTH_SCOPES,
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "state": verifier,
+                "state": login_id,
             }
         )
         authorization_url = (
@@ -514,17 +546,39 @@ class MCPSettingService:
             login_id,
             expected_user_id=str(user_id),
         )
-        verifier = login_state["verifier"]
-        if state != verifier:
+        if state != login_id:
             raise MCPOAuthError("Anthropic OAuth state mismatch. Start the Claude login again.")
 
         return await self._configure_claude_code_with_code_and_verifier(
             db,
             user_id=user_id,
             code=code,
-            verifier=verifier,
-            redirect_uri=login_state["redirect_uri"],
+            verifier=login_state["verifier"],
+            redirect_uri=login_state.get("oauth_redirect_uri")
+            or self._config.mcp.anthropic_oauth_redirect_uri,
         )
+
+    def resolve_claude_code_oauth_callback_redirect(
+        self,
+        *,
+        state: str,
+        code: str | None = None,
+        error: str | None = None,
+        error_description: str | None = None,
+    ) -> str:
+        """Resolve the frontend callback URL for the Claude Code OAuth popup."""
+        login_state = _verify_claude_code_oauth_login_id(self._config, state)
+        frontend_redirect_uri = login_state["redirect_uri"]
+
+        params: dict[str, str] = {"state": state}
+        if code:
+            params["code"] = code
+        if error:
+            params["error"] = error
+        if error_description:
+            params["error_description"] = error_description
+
+        return _append_query_params(frontend_redirect_uri, params)
 
     async def configure_claude_code(
         self,
@@ -610,7 +664,10 @@ class MCPSettingService:
         )
         if self._user_repo is not None:
             await self.set_default_runtime_setting(db, user_id=user_id, setting_id=setting.id)
-        return setting
+        refreshed_setting = await self._repo.get_by_id_and_user(db, setting.id, user_id)
+        if refreshed_setting is None:
+            raise MCPSettingNotFoundError(f"MCP setting {setting.id} not found or access denied")
+        return await self._serialize_setting_info(db, setting=refreshed_setting)
 
     async def _upsert_by_metadata_type(
         self,
@@ -677,6 +734,23 @@ class MCPSettingService:
                 setting_id=setting_id,
             )
 
+    async def _delete_orphaned_provider_connection(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        provider_connection_id: uuid.UUID | None,
+    ) -> None:
+        if provider_connection_id is None or self._provider_connection_service is None:
+            return
+        if await self._repo.has_provider_connection_reference(db, provider_connection_id):
+            return
+        await self._provider_connection_service.delete_connection(
+            db,
+            connection_id=provider_connection_id,
+            user_id=user_id,
+        )
+
     async def _is_usable_runtime_setting(
         self,
         db: AsyncSession,
@@ -716,7 +790,82 @@ class MCPSettingService:
         )
         if connection is None:
             return False
-        return bool(self._provider_connection_service.get_credentials_dict(connection))
+        return self._provider_connection_service.has_usable_credentials(connection)
+
+    async def _serialize_setting_info(
+        self,
+        db: AsyncSession,
+        *,
+        setting: MCPSetting,
+        include_secrets: bool = False,
+    ) -> MCPSettingInfo:
+        info = _to_mcp_setting_info(setting, include_secrets=include_secrets)
+        if _tool_type(setting) != "claude_code":
+            return info
+        return await self._hydrate_claude_code_setting_info(
+            db,
+            user_id=setting.user_id,
+            setting=setting,
+            info=info,
+        )
+
+    async def _hydrate_claude_code_setting_info(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID | str,
+        setting: MCPSetting,
+        info: MCPSettingInfo,
+    ) -> MCPSettingInfo:
+        if not isinstance(info.metadata, ClaudeCodeMetadata):
+            return info
+        if self._provider_connection_service is None:
+            return info
+
+        auth_state = await self._get_provider_auth_state(
+            db,
+            user_id=user_id,
+            provider_connection_id=getattr(setting, "provider_connection_id", None),
+        )
+        if auth_state is None:
+            info.metadata = ClaudeCodeMetadata.model_validate(
+                {
+                    **info.metadata.model_dump(exclude_none=True),
+                    "has_auth": False,
+                    "auth_status": "missing",
+                    "needs_reauth": True,
+                }
+            )
+            return info
+
+        info.metadata = ClaudeCodeMetadata.model_validate(
+            {
+                **info.metadata.model_dump(exclude_none=True),
+                "has_auth": auth_state.is_usable,
+                "auth_status": auth_state.auth_status,
+                "needs_reauth": auth_state.needs_reauth,
+            }
+        )
+        return info
+
+    async def _get_provider_auth_state(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID | str,
+        provider_connection_id: uuid.UUID | None,
+    ):
+        if not provider_connection_id or self._provider_connection_service is None:
+            return None
+
+        connection = await self._provider_connection_service.get_connection_model(
+            db,
+            connection_id=provider_connection_id,
+            user_id=user_id,
+        )
+        if connection is None:
+            return None
+        return self._provider_connection_service.describe_auth_state(connection)
 
 
 def _generate_pkce_pair() -> tuple[str, str]:
@@ -736,12 +885,14 @@ def _create_claude_code_oauth_login_id(
     user_id: str,
     verifier: str,
     redirect_uri: str,
+    oauth_redirect_uri: str,
 ) -> str:
     return _get_claude_code_oauth_serializer(config).dumps(
         {
             "user_id": user_id,
             "verifier": verifier,
             "redirect_uri": redirect_uri,
+            "oauth_redirect_uri": oauth_redirect_uri,
             "expires_at": int(datetime.now(timezone.utc).timestamp())
             + OPENAI_DEVICE_CODE_TTL_SECONDS,
         }
@@ -752,18 +903,26 @@ def _verify_claude_code_oauth_login_id(
     config: Settings,
     login_id: str,
     *,
-    expected_user_id: str,
+    expected_user_id: str | None = None,
 ) -> dict[str, Any]:
     try:
         state = _get_claude_code_oauth_serializer(config).loads(login_id)
     except BadSignature as exc:
         raise MCPOAuthError("Invalid Claude Code OAuth state. Start again.") from exc
 
-    if str(state.get("user_id") or "") != expected_user_id:
+    if expected_user_id is not None and str(state.get("user_id") or "") != expected_user_id:
         raise MCPOAuthError("Claude Code OAuth state does not belong to this user.")
     if int(state.get("expires_at", 0)) < int(datetime.now(timezone.utc).timestamp()):
         raise MCPOAuthError("Claude Code OAuth expired. Start again.")
     return state
+
+
+def _append_query_params(url: str, params: dict[str, str]) -> str:
+    """Append query params to a URL while preserving existing query parameters."""
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.update(params)
+    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
 def _sanitize_claude_code_redirect_uri(config: Settings, redirect_uri: str) -> str:
@@ -1124,18 +1283,28 @@ def _normalize_metadata(
             processed.pop("auth_json", None)
         processed.pop("encrypted_auth_json", None)
     if processed.get("tool_type") == "claude_code":
-        auth_json = processed.get("auth_json")
-        if isinstance(auth_json, str):
-            try:
-                auth_json = json.loads(auth_json)
-            except json.JSONDecodeError:
-                auth_json = None
-        processed["has_auth"] = bool(auth_json or processed.get("provider_connection_id"))
-        if include_secrets and auth_json:
-            processed["auth_json"] = auth_json
-        else:
-            processed.pop("auth_json", None)
+        processed["has_auth"] = bool(processed.get("has_auth"))
+        processed["needs_reauth"] = bool(processed.get("needs_reauth", False))
+        processed.pop("auth_json", None)
     return processed
+
+
+def _metadata_to_storage_payload(metadata: Any) -> dict[str, Any] | None:
+    """Serialize metadata for DB storage while stripping deprecated secret fields."""
+    if metadata is None:
+        return None
+
+    if hasattr(metadata, "model_dump"):
+        payload = metadata.model_dump(mode="json", exclude_none=True)
+    elif isinstance(metadata, dict):
+        payload = jsonable_encoder(metadata, exclude_none=True)
+    else:
+        raise TypeError("Unsupported MCP metadata payload")
+
+    if payload.get("tool_type") == "claude_code":
+        payload.pop("auth_json", None)
+
+    return payload
 
 
 def _to_mcp_setting_info(setting: MCPSetting, *, include_secrets: bool = False) -> MCPSettingInfo:

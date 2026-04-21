@@ -353,6 +353,7 @@ class TestMCPSchemasR4:
         }
         result = validate_metadata(metadata)
         assert isinstance(result, ClaudeCodeMetadata)
+        assert not hasattr(result, "auth_json")
 
     def test_validate_metadata_composio(self):
         from ii_agent.settings.mcp.schemas import validate_metadata, ComposioMetadata
@@ -361,7 +362,7 @@ class TestMCPSchemasR4:
             "tool_type": "composio",
             "toolkit_slug": "gmail",
             "toolkit_name": "Gmail",
-            "profile_id": "profile-1",
+            "profile_id": "11111111-1111-1111-1111-111111111111",
         }
         result = validate_metadata(metadata)
         assert isinstance(result, ComposioMetadata)

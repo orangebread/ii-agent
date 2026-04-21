@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from ii_agent.settings.mcp.schemas import (
     ClaudeCodeMetadata,
     CodexMetadata,
@@ -64,7 +66,7 @@ def test_validate_metadata_rejects_invalid_codex_auth_json_string():
         )
 
 
-def test_validate_metadata_parses_claude_code_auth_json_string():
+def test_validate_metadata_ignores_legacy_claude_code_auth_json():
     metadata = validate_metadata(
         {
             "tool_type": "claude_code",
@@ -74,7 +76,8 @@ def test_validate_metadata_parses_claude_code_auth_json_string():
     )
 
     assert isinstance(metadata, ClaudeCodeMetadata)
-    assert metadata.auth_json["access_token"] == "a"
+    assert metadata.store_path == "~/.claude"
+    assert not hasattr(metadata, "auth_json")
 
 
 def test_validate_metadata_handles_composio_and_unknown_types():
@@ -83,7 +86,7 @@ def test_validate_metadata_handles_composio_and_unknown_types():
             "tool_type": "composio",
             "toolkit_slug": "gmail",
             "toolkit_name": "Gmail",
-            "profile_id": "profile-1",
+            "profile_id": "11111111-1111-1111-1111-111111111111",
         }
     )
     fallback = validate_metadata({"tool_type": "custom"})
@@ -97,25 +100,27 @@ def test_mcp_setting_list_get_by_id_returns_match_or_none():
     setting_list = MCPSettingList(
         settings=[
             _setting(
-                "s1",
+                "11111111-1111-1111-1111-111111111111",
                 is_active=True,
                 servers={"server-a": _stdio_server("npx")},
             ),
             _setting(
-                "s2",
+                "22222222-2222-2222-2222-222222222222",
                 is_active=False,
                 servers={"server-b": _stdio_server("uvx")},
             ),
         ]
     )
 
-    assert setting_list.get_by_id("s1").id == "s1"
-    assert setting_list.get_by_id("missing") is None
+    assert str(setting_list.get_by_id(UUID("11111111-1111-1111-1111-111111111111")).id) == (
+        "11111111-1111-1111-1111-111111111111"
+    )
+    assert setting_list.get_by_id(UUID("44444444-4444-4444-4444-444444444444")) is None
 
 
 def test_get_combined_active_config_merges_and_skips_codex_as_mcp():
     active_1 = _setting(
-        "s1",
+        "11111111-1111-1111-1111-111111111111",
         is_active=True,
         servers={
             "codex-as-mcp": _stdio_server("uvx"),
@@ -124,12 +129,12 @@ def test_get_combined_active_config_merges_and_skips_codex_as_mcp():
         metadata=CodexMetadata(auth_json={"OPENAI_API_KEY": "k"}, store_path=""),
     )
     inactive = _setting(
-        "s2",
+        "22222222-2222-2222-2222-222222222222",
         is_active=False,
         servers={"inactive-server": _stdio_server("python")},
     )
     active_2 = _setting(
-        "s3",
+        "33333333-3333-3333-3333-333333333333",
         is_active=True,
         servers={
             "shared-server": _stdio_server("uvx"),
@@ -138,7 +143,7 @@ def test_get_combined_active_config_merges_and_skips_codex_as_mcp():
         metadata=ComposioMetadata(
             toolkit_slug="github",
             toolkit_name="GitHub",
-            profile_id="profile-2",
+            profile_id="22222222-2222-2222-2222-222222222222",
         ),
     )
     setting_list = MCPSettingList(settings=[active_1, inactive, active_2])

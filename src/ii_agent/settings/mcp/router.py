@@ -3,6 +3,7 @@
 from typing import Optional
 
 from fastapi import APIRouter
+from fastapi.responses import RedirectResponse
 
 from ii_agent.auth.dependencies import CurrentUser, DBSession
 from ii_agent.settings.mcp.exceptions import MCPSettingNotFoundError
@@ -138,6 +139,24 @@ async def configure_claude_code_mcp(
     )
 
 
+@router.delete("/claude-code")
+async def delete_claude_code_mcp(
+    current_user: CurrentUser,
+    service: MCPSettingServiceDep,
+    db: DBSession,
+):
+    """Disconnect Claude Code and remove the stored OAuth connection."""
+    deleted = await service.delete_claude_code_setting(
+        db,
+        user_id=str(current_user.id),
+    )
+
+    if not deleted:
+        raise MCPSettingNotFoundError("Claude Code settings not found")
+
+    return {"message": "Claude Code settings deleted successfully"}
+
+
 @router.post("/claude-code/oauth/start", response_model=ClaudeCodeOAuthStartResponse)
 async def start_claude_code_oauth(
     request: ClaudeCodeOAuthStartRequest,
@@ -166,6 +185,24 @@ async def complete_claude_code_oauth(
         code=request.code,
         state=request.state,
     )
+
+
+@router.get("/claude-code/oauth/callback", include_in_schema=False)
+async def claude_code_oauth_callback(
+    service: MCPSettingServiceDep,
+    code: Optional[str] = None,
+    state: str = "",
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+):
+    """Bridge Anthropic's OAuth callback back to the frontend popup callback."""
+    redirect_url = service.resolve_claude_code_oauth_callback_redirect(
+        state=state,
+        code=code,
+        error=error,
+        error_description=error_description,
+    )
+    return RedirectResponse(url=redirect_url, status_code=302)
 
 
 @router.post("", response_model=MCPSettingInfo)

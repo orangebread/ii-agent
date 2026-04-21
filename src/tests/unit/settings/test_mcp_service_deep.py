@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -31,6 +31,7 @@ from ii_agent.settings.mcp.service import (
     _verify_claude_code_oauth_login_id,
     _to_mcp_setting_info,
 )
+from ii_agent.settings.provider_connections.service import ProviderConnectionAuthState
 
 pytestmark = pytest.mark.unit
 
@@ -99,6 +100,12 @@ class FakeMCPRepo:
             result = [s for s in result if s.is_active]
         return result
 
+    async def has_provider_connection_reference(self, db, provider_connection_id):
+        return any(
+            str(setting.provider_connection_id) == str(provider_connection_id)
+            for setting in self.items.values()
+        )
+
     async def create(self, db, setting):
         self.items[setting.id] = setting
         # Track by tool_type if metadata has it
@@ -121,12 +128,15 @@ class FakeMCPRepo:
 
 
 class FakeProviderConnectionService:
-    def __init__(self):
+    def __init__(self, connection_id_factory=None):
         self.connections: dict[str, dict] = {}
         self.counter = 0
+        self.deleted_connection_ids: list[str] = []
+        self.connection_id_factory = connection_id_factory or (lambda: str(uuid.uuid4()))
 
     async def upsert_connection(self, db, **kwargs):
-        existing_id = None
+        existing_key = None
+        existing_row_id = None
         for connection_id, stored in self.connections.items():
             row = stored["row"]
             if (
@@ -134,26 +144,40 @@ class FakeProviderConnectionService:
                 and row.provider == kwargs["provider"]
                 and row.product == kwargs["product"]
             ):
-                existing_id = connection_id
+                existing_key = connection_id
+                existing_row_id = row.id
                 break
 
-        if existing_id is None:
+        if existing_key is None:
             self.counter += 1
-            existing_id = str(uuid.uuid4())
+            existing_row_id = self.connection_id_factory()
+            existing_key = str(existing_row_id)
 
         row = SimpleNamespace(
-            id=existing_id,
+            id=existing_row_id,
             user_id=kwargs["user_id"],
             provider=kwargs["provider"],
             product=kwargs["product"],
             encrypted_credentials_json="encrypted",
             connection_metadata=kwargs.get("connection_metadata") or {},
+            status=kwargs.get("status", "connected"),
+            expires_at=kwargs.get("expires_at"),
         )
-        self.connections[existing_id] = {
+        self.connections[existing_key] = {
             "row": row,
             "credentials": kwargs.get("credentials") or {},
         }
         return row
+
+    async def delete_connection(self, db, *, connection_id, user_id):
+        stored = self.connections.get(str(connection_id))
+        if not stored:
+            return False
+        if str(stored["row"].user_id) != str(user_id):
+            return False
+        self.deleted_connection_ids.append(str(connection_id))
+        del self.connections[str(connection_id)]
+        return True
 
     async def get_connection_model(self, db, *, connection_id, user_id):
         stored = self.connections.get(str(connection_id))
@@ -165,6 +189,47 @@ class FakeProviderConnectionService:
     def get_credentials_dict(self, connection):
         stored = self.connections.get(str(connection.id))
         return stored["credentials"] if stored else {}
+
+    def has_usable_credentials(self, connection):
+        return self.describe_auth_state(connection).is_usable
+
+    def describe_auth_state(self, connection):
+        credentials = self.get_credentials_dict(connection)
+        if not credentials:
+            return ProviderConnectionAuthState(
+                has_stored_auth=False,
+                is_usable=False,
+                auth_status="missing",
+                needs_reauth=True,
+            )
+        if getattr(connection, "status", "connected") != "connected":
+            return ProviderConnectionAuthState(
+                has_stored_auth=True,
+                is_usable=False,
+                auth_status=getattr(connection, "status", "error"),
+                needs_reauth=True,
+            )
+
+        expires_at = getattr(connection, "expires_at", None)
+        claude_oauth = credentials.get("claudeAiOauth", {})
+        if (
+            expires_at is not None
+            and expires_at <= datetime.now(timezone.utc)
+            and not (isinstance(claude_oauth, dict) and claude_oauth.get("refreshToken"))
+        ):
+            return ProviderConnectionAuthState(
+                has_stored_auth=True,
+                is_usable=False,
+                auth_status="expired",
+                needs_reauth=True,
+            )
+
+        return ProviderConnectionAuthState(
+            has_stored_auth=True,
+            is_usable=True,
+            auth_status="connected",
+            needs_reauth=False,
+        )
 
 
 class FakeUserRepo:
@@ -304,6 +369,33 @@ async def test_create_mcp_settings_stores_metadata():
     assert stored.mcp_metadata.get("tool_type") == "codex"
 
 
+@pytest.mark.asyncio
+async def test_create_mcp_settings_strips_legacy_claude_auth_json():
+    """Claude runtime metadata must not persist raw auth payloads."""
+    repo = FakeMCPRepo()
+    svc = _make_service(repo=repo)
+
+    await svc.create_mcp_settings(
+        db=None,
+        user_id="u1",
+        mcp_setting_in=MCPSettingCreate.model_validate(
+            {
+                "mcp_config": {"mcpServers": {}},
+                "metadata": {
+                    "tool_type": "claude_code",
+                    "auth_json": {"claudeAiOauth": {"refreshToken": "secret"}},
+                    "store_path": "~/.claude",
+                },
+            }
+        ),
+    )
+
+    stored = list(repo.items.values())[0]
+    assert stored.mcp_metadata["tool_type"] == "claude_code"
+    assert stored.mcp_metadata["store_path"] == "~/.claude"
+    assert "auth_json" not in stored.mcp_metadata
+
+
 # ---------------------------------------------------------------------------
 # Tests – update_mcp_settings
 # ---------------------------------------------------------------------------
@@ -370,6 +462,37 @@ async def test_update_mcp_settings_updates_mcp_config():
     )
 
     assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_settings_strips_legacy_claude_auth_json():
+    """Claude runtime updates must not reintroduce raw auth payloads."""
+    setting = _make_mcp_setting(
+        user_id="u1",
+        mcp_metadata={"tool_type": "claude_code", "store_path": "~/.claude"},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    svc = _make_service(repo=repo)
+
+    await svc.update_mcp_settings(
+        db=None,
+        setting_id=setting.id,
+        user_id="u1",
+        setting_update=MCPSettingUpdate.model_validate(
+            {
+                "metadata": {
+                    "tool_type": "claude_code",
+                    "auth_json": {"claudeAiOauth": {"refreshToken": "secret"}},
+                    "store_path": "~/.claude",
+                }
+            }
+        ),
+    )
+
+    assert setting.mcp_metadata["tool_type"] == "claude_code"
+    assert setting.mcp_metadata["store_path"] == "~/.claude"
+    assert "auth_json" not in setting.mcp_metadata
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +604,39 @@ async def test_delete_mcp_settings_not_found_returns_false():
 
 
 @pytest.mark.asyncio
+async def test_delete_claude_code_setting_deletes_by_tool_type():
+    provider_connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=provider_connection_id,
+        mcp_metadata={"tool_type": "claude_code", "provider_connection_id": provider_connection_id},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    repo.by_tool_type["claude_code"] = setting
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[provider_connection_id] = {
+        "row": SimpleNamespace(
+            id=provider_connection_id,
+            user_id="u1",
+            provider="anthropic",
+            product="claude_code",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+            status="connected",
+            expires_at=None,
+        ),
+        "credentials": {"claudeAiOauth": {"refreshToken": "refresh-123"}},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+
+    result = await svc.delete_claude_code_setting(db=None, user_id="u1")
+
+    assert result is True
+    assert provider_connection_svc.deleted_connection_ids == [provider_connection_id]
+
+
+@pytest.mark.asyncio
 async def test_delete_mcp_settings_clears_default_and_session_references():
     """Deleting a selected runtime clears user/session selectors before removal."""
     setting = _make_mcp_setting(
@@ -500,6 +656,78 @@ async def test_delete_mcp_settings_clears_default_and_session_references():
     assert user_repo.user.default_mcp_setting_id is None
     assert session.mcp_setting_id is None
     assert setting.id not in repo.items
+
+
+@pytest.mark.asyncio
+async def test_delete_mcp_settings_removes_orphaned_provider_connection():
+    """Deleting the last runtime reference tears down stored provider credentials."""
+    provider_connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=provider_connection_id,
+        mcp_metadata={"tool_type": "claude_code", "provider_connection_id": provider_connection_id},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[provider_connection_id] = {
+        "row": SimpleNamespace(
+            id=provider_connection_id,
+            user_id="u1",
+            provider="anthropic",
+            product="claude_code",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+            status="connected",
+            expires_at=None,
+        ),
+        "credentials": {"claudeAiOauth": {"refreshToken": "refresh-123"}},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+
+    result = await svc.delete_mcp_settings(db=None, setting_id=setting.id, user_id="u1")
+
+    assert result is True
+    assert provider_connection_svc.deleted_connection_ids == [provider_connection_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_mcp_settings_keeps_shared_provider_connection():
+    """Shared provider credentials stay intact while another runtime still references them."""
+    provider_connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=provider_connection_id,
+        mcp_metadata={"tool_type": "claude_code", "provider_connection_id": provider_connection_id},
+    )
+    sibling = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=provider_connection_id,
+        mcp_metadata={"tool_type": "codex", "provider_connection_id": provider_connection_id},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    repo.items[sibling.id] = sibling
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[provider_connection_id] = {
+        "row": SimpleNamespace(
+            id=provider_connection_id,
+            user_id="u1",
+            provider="anthropic",
+            product="claude_code",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+            status="connected",
+            expires_at=None,
+        ),
+        "credentials": {"claudeAiOauth": {"refreshToken": "refresh-123"}},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+
+    result = await svc.delete_mcp_settings(db=None, setting_id=setting.id, user_id="u1")
+
+    assert result is True
+    assert provider_connection_svc.deleted_connection_ids == []
 
 
 # ---------------------------------------------------------------------------
@@ -537,22 +765,44 @@ async def test_get_codex_setting_returns_none_when_missing():
 @pytest.mark.asyncio
 async def test_get_claude_code_setting_returns_setting():
     """Returns the claude_code setting for a user."""
+    provider_connection_id = str(uuid.uuid4())
     setting = _make_mcp_setting(
         user_id="u1",
         mcp_metadata={
             "tool_type": "claude_code",
-            "auth_json": {"claudeAiOauth": {}},
+            "provider_connection_id": provider_connection_id,
+            "has_auth": True,
             "store_path": "",
         },
+        provider_connection_id=provider_connection_id,
     )
     repo = FakeMCPRepo()
     repo.items[setting.id] = setting
     repo.by_tool_type["claude_code"] = setting
-    svc = _make_service(repo=repo)
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[provider_connection_id] = {
+        "row": SimpleNamespace(
+            id=provider_connection_id,
+            user_id="u1",
+            provider="anthropic",
+            product="claude_code",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+            status="connected",
+            expires_at=None,
+        ),
+        "credentials": {"claudeAiOauth": {"refreshToken": "refresh-123"}},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
 
     result = await svc.get_claude_code_setting(db=None, user_id="u1")
 
     assert result is not None
+    assert result.metadata is not None
+    assert result.metadata.has_auth is True
+    assert result.metadata.auth_status == "connected"
+    assert result.metadata.needs_reauth is False
+    assert not hasattr(result.metadata, "auth_json")
 
 
 @pytest.mark.asyncio
@@ -563,6 +813,33 @@ async def test_get_claude_code_setting_returns_none_when_missing():
     result = await svc.get_claude_code_setting(db=None, user_id="u1")
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_get_claude_code_setting_marks_missing_connection_as_reauth_required():
+    provider_connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        mcp_metadata={
+            "tool_type": "claude_code",
+            "provider_connection_id": provider_connection_id,
+            "has_auth": True,
+            "store_path": "~/.claude",
+        },
+        provider_connection_id=provider_connection_id,
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    repo.by_tool_type["claude_code"] = setting
+    svc = _make_service(repo=repo, provider_connection_service=FakeProviderConnectionService())
+
+    result = await svc.get_claude_code_setting(db=None, user_id="u1")
+
+    assert result is not None
+    assert result.metadata is not None
+    assert result.metadata.has_auth is False
+    assert result.metadata.auth_status == "missing"
+    assert result.metadata.needs_reauth is True
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +871,28 @@ async def test_configure_codex_with_apikey_only():
         "sk-test-key"
     )
     assert created.mcp_metadata["auth_mode"] == "api_key"
+
+
+@pytest.mark.asyncio
+async def test_configure_codex_serializes_uuid_provider_connection_id_for_storage():
+    """Codex metadata stored in JSONB must not retain UUID objects."""
+    repo = FakeMCPRepo()
+    provider_connection_svc = FakeProviderConnectionService(connection_id_factory=uuid.uuid4)
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+
+    await svc.configure_codex(
+        db=None,
+        user_id="u1",
+        auth_json=None,
+        apikey="sk-test-key",
+        model=None,
+        reasoning_effort=None,
+        search=False,
+    )
+
+    created = list(repo.items.values())[0]
+    assert isinstance(created.mcp_metadata["provider_connection_id"], str)
+    assert uuid.UUID(created.mcp_metadata["provider_connection_id"])
 
 
 @pytest.mark.asyncio
@@ -784,8 +1083,13 @@ async def test_configure_claude_code_token_exchange_success():
         )
 
     assert result is not None
+    assert result.metadata is not None
+    assert result.metadata.has_auth is True
+    assert result.metadata.auth_status == "connected"
+    assert result.metadata.needs_reauth is False
     created = list(repo.items.values())[0]
     assert created.mcp_metadata["tool_type"] == "claude_code"
+    assert "auth_json" not in created.mcp_metadata
 
 
 @pytest.mark.asyncio
@@ -822,6 +1126,46 @@ async def test_configure_claude_code_updates_existing():
 
     # Should update existing, not create new
     assert len(repo.items) == 1
+    assert "auth_json" not in existing.mcp_metadata
+
+
+@pytest.mark.asyncio
+async def test_complete_claude_code_oauth_serializes_uuid_provider_connection_id_for_storage():
+    """Claude OAuth completion must serialize provider connection UUIDs before JSONB insert."""
+    repo = FakeMCPRepo()
+    provider_connection_svc = FakeProviderConnectionService(connection_id_factory=uuid.uuid4)
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+    start = await svc.start_claude_code_oauth(
+        user_id="u1",
+        redirect_uri="http://localhost:1420/claude-code-callback",
+    )
+
+    with patch(
+        "ii_agent.settings.mcp.service._exchange_code_for_tokens",
+        new=AsyncMock(
+            return_value={
+                "access_token": "access-123",
+                "refresh_token": "refresh-456",
+                "expires_in": 3600,
+            }
+        ),
+    ):
+        result = await svc.complete_claude_code_oauth(
+            db=None,
+            user_id="u1",
+            login_id=start.login_id,
+            code="auth-code",
+            state=start.login_id,
+        )
+
+    created = list(repo.items.values())[0]
+    assert isinstance(created.mcp_metadata["provider_connection_id"], str)
+    assert uuid.UUID(created.mcp_metadata["provider_connection_id"])
+    assert result.metadata is not None
+    assert (
+        str(result.metadata.provider_connection_id)
+        == created.mcp_metadata["provider_connection_id"]
+    )
 
 
 @pytest.mark.asyncio
@@ -836,25 +1180,26 @@ async def test_start_claude_code_oauth_builds_authorization_url():
 
     assert result.login_id
     assert result.authorization_url.startswith("https://claude.ai/oauth/authorize?")
-    assert "redirect_uri=http%3A%2F%2Flocalhost%3A1420%2Fclaude-code-callback" in (
-        result.authorization_url
-    )
+    assert "redirect_uri=https%3A%2F%2Fexample.com%2Fcallback" in result.authorization_url
     assert "code_challenge=" in result.authorization_url
+    assert f"state={result.login_id}" in result.authorization_url
+    staged = _verify_claude_code_oauth_login_id(
+        svc._config,
+        result.login_id,
+        expected_user_id="u1",
+    )
+    assert staged["redirect_uri"] == "http://localhost:1420/claude-code-callback"
+    assert staged["oauth_redirect_uri"] == "https://example.com/callback"
 
 
 @pytest.mark.asyncio
 async def test_complete_claude_code_oauth_uses_staged_redirect_uri():
-    """Completion must reuse the exact redirect URI staged at OAuth start."""
+    """Completion must reuse the exact provider redirect URI staged at OAuth start."""
     repo = FakeMCPRepo()
     svc = _make_service(repo=repo, provider_connection_service=FakeProviderConnectionService())
     start = await svc.start_claude_code_oauth(
         user_id="u1",
         redirect_uri="http://localhost:1420/claude-code-callback",
-    )
-    staged = _verify_claude_code_oauth_login_id(
-        svc._config,
-        start.login_id,
-        expected_user_id="u1",
     )
 
     with patch(
@@ -872,11 +1217,27 @@ async def test_complete_claude_code_oauth_uses_staged_redirect_uri():
             user_id="u1",
             login_id=start.login_id,
             code="auth-code",
-            state=staged["verifier"],
+            state=start.login_id,
         )
 
-    assert exchange_mock.await_args.kwargs["redirect_uri"] == (
-        "http://localhost:1420/claude-code-callback"
+    assert exchange_mock.await_args.kwargs["redirect_uri"] == "https://example.com/callback"
+
+
+@pytest.mark.asyncio
+async def test_resolve_claude_code_oauth_callback_redirect_uses_staged_frontend_uri():
+    """OAuth callback should return the popup to the staged frontend callback URI."""
+    svc = _make_service()
+    start = await svc.start_claude_code_oauth(
+        user_id="u1",
+        redirect_uri="http://localhost:1420/claude-code-callback",
+    )
+    result = svc.resolve_claude_code_oauth_callback_redirect(
+        state=start.login_id,
+        code="auth-code",
+    )
+
+    assert result == (
+        f"http://localhost:1420/claude-code-callback?state={start.login_id}&code=auth-code"
     )
 
 
@@ -933,6 +1294,112 @@ async def test_assert_runtime_setting_selectable_rejects_missing_provider_creden
         )
 
 
+@pytest.mark.asyncio
+async def test_assert_runtime_setting_selectable_allows_expired_claude_credentials_with_refresh():
+    connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=connection_id,
+        mcp_metadata={"tool_type": "claude_code", "provider_connection_id": connection_id},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[connection_id] = {
+        "row": SimpleNamespace(
+            id=connection_id,
+            user_id="u1",
+            provider="anthropic",
+            product="claude_code",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+            status="connected",
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        ),
+        "credentials": {"claudeAiOauth": {"refreshToken": "refresh-123"}},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+
+    result = await svc.assert_runtime_setting_selectable(
+        db=None,
+        user_id="u1",
+        setting_id=uuid.UUID(setting.id),
+        selection_kind="session",
+    )
+
+    assert result is setting
+
+
+@pytest.mark.asyncio
+async def test_assert_runtime_setting_selectable_rejects_expired_provider_credentials_without_refresh():
+    connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=connection_id,
+        mcp_metadata={"tool_type": "claude_code", "provider_connection_id": connection_id},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[connection_id] = {
+        "row": SimpleNamespace(
+            id=connection_id,
+            user_id="u1",
+            provider="anthropic",
+            product="claude_code",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+            status="connected",
+            expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+        ),
+        "credentials": {"claudeAiOauth": {"accessToken": "access-only"}},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+
+    with pytest.raises(MCPOAuthError, match="missing provider credentials"):
+        await svc.assert_runtime_setting_selectable(
+            db=None,
+            user_id="u1",
+            setting_id=uuid.UUID(setting.id),
+            selection_kind="session",
+        )
+
+
+@pytest.mark.asyncio
+async def test_assert_runtime_setting_selectable_rejects_non_connected_provider_credentials():
+    connection_id = str(uuid.uuid4())
+    setting = _make_mcp_setting(
+        user_id="u1",
+        provider_connection_id=connection_id,
+        mcp_metadata={"tool_type": "claude_code", "provider_connection_id": connection_id},
+    )
+    repo = FakeMCPRepo()
+    repo.items[setting.id] = setting
+    provider_connection_svc = FakeProviderConnectionService()
+    provider_connection_svc.connections[connection_id] = {
+        "row": SimpleNamespace(
+            id=connection_id,
+            user_id="u1",
+            provider="anthropic",
+            product="claude_code",
+            encrypted_credentials_json="encrypted",
+            connection_metadata={},
+            status="reauth_required",
+            expires_at=None,
+        ),
+        "credentials": {"claudeAiOauth": {"refreshToken": "refresh-123"}},
+    }
+    svc = _make_service(repo=repo, provider_connection_service=provider_connection_svc)
+
+    with pytest.raises(MCPOAuthError, match="missing provider credentials"):
+        await svc.assert_runtime_setting_selectable(
+            db=None,
+            user_id="u1",
+            setting_id=uuid.UUID(setting.id),
+            selection_kind="session",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Tests – _to_mcp_setting_info (converter)
 # ---------------------------------------------------------------------------
@@ -973,6 +1440,25 @@ def test_to_mcp_setting_info_with_codex_metadata_include_secrets():
 
     assert result.metadata is not None
     assert result.metadata.auth_json == {"OPENAI_API_KEY": "key"}
+
+
+def test_to_mcp_setting_info_redacts_legacy_claude_auth_json():
+    """Claude metadata redacts legacy auth payloads without inferring live readiness."""
+    setting = _make_mcp_setting(
+        user_id="u1",
+        mcp_metadata={
+            "tool_type": "claude_code",
+            "auth_json": {"claudeAiOauth": {"refreshToken": "secret"}},
+            "store_path": "~/.claude",
+        },
+    )
+
+    result = _to_mcp_setting_info(setting, include_secrets=True)
+
+    assert result.metadata is not None
+    assert result.metadata.tool_type == "claude_code"
+    assert result.metadata.has_auth is False
+    assert not hasattr(result.metadata, "auth_json")
 
 
 def test_to_mcp_setting_info_without_metadata():

@@ -13,8 +13,10 @@ EXPECTED_ROUTES = {
     ("POST", "/mcp/codex/openai/device/poll"),
     ("GET", "/mcp/claude-code"),
     ("POST", "/mcp/claude-code"),
+    ("DELETE", "/mcp/claude-code"),
     ("POST", "/mcp/claude-code/oauth/start"),
     ("POST", "/mcp/claude-code/oauth/complete"),
+    ("GET", "/mcp/claude-code/oauth/callback"),
     ("POST", "/mcp"),
     ("GET", "/mcp"),
     ("GET", "/mcp/{setting_id}"),
@@ -28,4 +30,9 @@ def test_mcp_router_routes_registered():
 
 
 def test_mcp_router_auth_contract():
-    assert_auth_contract(router, protected=EXPECTED_ROUTES)
+    protected_routes = EXPECTED_ROUTES - {("GET", "/mcp/claude-code/oauth/callback")}
+    assert_auth_contract(
+        router,
+        protected=protected_routes,
+        public={("GET", "/mcp/claude-code/oauth/callback")},
+    )

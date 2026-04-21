@@ -9,10 +9,11 @@
     "license": "MIT",
     "type": "module",
     "scripts": {
-        "dev": "vite",
-        "build": "tsc && vite build",
-        "preview": "vite preview",
-        "tauri": "tauri",
+        "guard:node-runtime": "node ./scripts/ensure-supported-node.mjs",
+        "dev": "node ./scripts/ensure-supported-node.mjs && vite",
+        "build": "node ./scripts/ensure-supported-node.mjs && tsc && vite build",
+        "preview": "node ./scripts/ensure-supported-node.mjs && vite preview",
+        "tauri": "node ./scripts/ensure-supported-node.mjs && tauri",
         "prepare": "husky",
         "lint": "eslint . --report-unused-disable-directives --max-warnings 0",
         "format": "prettier --write ."

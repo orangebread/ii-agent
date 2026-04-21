@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -17,6 +18,16 @@ from ii_agent.settings.provider_connections.schemas import (
     ProviderConnectionList,
     ProviderConnectionStatus,
 )
+
+
+@dataclass(frozen=True)
+class ProviderConnectionAuthState:
+    """Derived runtime auth state for a provider connection."""
+
+    has_stored_auth: bool
+    is_usable: bool
+    auth_status: str
+    needs_reauth: bool
 
 
 class ProviderConnectionService:
@@ -67,6 +78,19 @@ class ProviderConnectionService:
             provider=provider,
             product=product,
         )
+
+    async def delete_connection(
+        self,
+        db: AsyncSession,
+        *,
+        connection_id: uuid.UUID | str,
+        user_id: uuid.UUID | str,
+    ) -> bool:
+        row = await self._repo.get_by_id_and_user(db, connection_id, user_id)
+        if row is None:
+            return False
+        await self._repo.delete(db, row)
+        return True
 
     async def upsert_connection(
         self,
@@ -141,6 +165,68 @@ class ProviderConnectionService:
         except json.JSONDecodeError:
             return {}
 
+    def has_usable_credentials(
+        self,
+        connection: ProviderConnection,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        return self.describe_auth_state(connection, now=now).is_usable
+
+    def describe_auth_state(
+        self,
+        connection: ProviderConnection,
+        *,
+        now: datetime | None = None,
+    ) -> ProviderConnectionAuthState:
+        current_time = now or datetime.now(timezone.utc)
+        credentials = self.get_credentials_dict(connection)
+        has_stored_auth = bool(credentials)
+        status = getattr(connection, "status", None) or ProviderConnectionStatus.CONNECTED.value
+
+        if not has_stored_auth:
+            return ProviderConnectionAuthState(
+                has_stored_auth=False,
+                is_usable=False,
+                auth_status="missing",
+                needs_reauth=True,
+            )
+
+        if status != ProviderConnectionStatus.CONNECTED.value:
+            return ProviderConnectionAuthState(
+                has_stored_auth=True,
+                is_usable=False,
+                auth_status=status,
+                needs_reauth=True,
+            )
+
+        if _has_refreshable_oauth_credentials(connection, credentials):
+            return ProviderConnectionAuthState(
+                has_stored_auth=True,
+                is_usable=True,
+                auth_status=ProviderConnectionStatus.CONNECTED.value,
+                needs_reauth=False,
+            )
+
+        expires_at = getattr(connection, "expires_at", None)
+        if expires_at is not None:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= current_time:
+                return ProviderConnectionAuthState(
+                    has_stored_auth=True,
+                    is_usable=False,
+                    auth_status=ProviderConnectionStatus.EXPIRED.value,
+                    needs_reauth=True,
+                )
+
+        return ProviderConnectionAuthState(
+            has_stored_auth=True,
+            is_usable=True,
+            auth_status=ProviderConnectionStatus.CONNECTED.value,
+            needs_reauth=False,
+        )
+
 
 def _to_info(connection: ProviderConnection) -> ProviderConnectionInfo:
     return ProviderConnectionInfo(
@@ -161,3 +247,19 @@ def _to_info(connection: ProviderConnection) -> ProviderConnectionInfo:
         created_at=connection.created_at,
         updated_at=connection.updated_at,
     )
+
+
+def _has_refreshable_oauth_credentials(
+    connection: ProviderConnection,
+    credentials: dict[str, Any],
+) -> bool:
+    """Return whether the stored credentials can self-refresh without reauth."""
+    if (
+        getattr(connection, "provider", None) == "anthropic"
+        and getattr(connection, "product", None) == "claude_code"
+    ):
+        oauth = credentials.get("claudeAiOauth")
+        return isinstance(oauth, dict) and bool(oauth.get("refreshToken"))
+
+    tokens = credentials.get("tokens")
+    return isinstance(tokens, dict) and bool(tokens.get("refresh_token"))

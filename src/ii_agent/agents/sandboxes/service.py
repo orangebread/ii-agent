@@ -776,9 +776,9 @@ class SandboxService:
                     connection_id=selected_runtime.provider_connection_id,
                     user_id=user_id,
                 )
-                credentials = (
-                    provider_connection_svc.get_credentials_dict(connection) if connection else {}
-                )
+                credentials = {}
+                if connection and provider_connection_svc.has_usable_credentials(connection):
+                    credentials = provider_connection_svc.get_credentials_dict(connection)
                 if selected_tool_type == "codex" and credentials:
                     store_path = f"{self._config.sandbox.user}/.codex/auth.json"
                     await sandbox.write_file(store_path, json.dumps(credentials))

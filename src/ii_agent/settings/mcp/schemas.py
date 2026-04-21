@@ -19,7 +19,10 @@ class MCPMetadata(BaseModel):
 class CodexMetadata(MCPMetadata):
     """Metadata specific to Codex MCP tool."""
 
-    tool_type: str = Field(default="codex", description="Tool type is always 'codex'")
+    tool_type: Literal["codex"] = Field(
+        default="codex",
+        description="Tool type is always 'codex'",
+    )
     auth_json: Optional[Dict[str, Any]] = Field(
         default=None,
         description="Codex authentication JSON. Only populated for trusted internal consumers.",
@@ -64,16 +67,23 @@ class CodexMetadata(MCPMetadata):
 class ClaudeCodeMetadata(MCPMetadata):
     """Metadata specific to Claude Code MCP tool."""
 
-    tool_type: str = Field(default="claude_code", description="Tool type is always 'claude_code'")
-    auth_json: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Claude Code authentication JSON (access_token, refresh_token, expires_at)",
+    tool_type: Literal["claude_code"] = Field(
+        default="claude_code",
+        description="Tool type is always 'claude_code'",
     )
     provider_connection_id: Optional[UUID] = Field(
         default=None,
         description="Stored provider connection backing this runtime",
     )
     has_auth: bool = Field(default=False, description="Whether Claude Code auth is configured")
+    auth_status: Optional[str] = Field(
+        default=None,
+        description="Live Claude Code auth status (connected, expired, reauth_required, etc.)",
+    )
+    needs_reauth: bool = Field(
+        default=False,
+        description="Whether the user must reconnect Claude Code before it can be used",
+    )
     store_path: str = Field(
         default="~/.claude", description="Path where Claude Code stores its data"
     )
@@ -82,7 +92,10 @@ class ClaudeCodeMetadata(MCPMetadata):
 class ComposioMetadata(MCPMetadata):
     """Metadata specific to Composio MCP tool."""
 
-    tool_type: str = Field(default="composio", description="Tool type is always 'composio'")
+    tool_type: Literal["composio"] = Field(
+        default="composio",
+        description="Tool type is always 'composio'",
+    )
     toolkit_slug: str = Field(..., description="Composio toolkit slug (e.g., 'gmail')")
     toolkit_name: str = Field(..., description="Composio toolkit display name")
     profile_id: UUID = Field(..., description="Composio profile ID")
@@ -120,15 +133,7 @@ def validate_metadata(metadata_dict: Dict[str, Any]) -> MCPMetadataType:
 
         return CodexMetadata(**processed_metadata)
     elif tool_type == "claude_code":
-        processed_metadata = metadata_dict.copy()
-        auth_json = processed_metadata.get("auth_json")
-        if isinstance(auth_json, str):
-            try:
-                processed_metadata["auth_json"] = json.loads(auth_json)
-            except json.JSONDecodeError:
-                raise ValueError(f"Invalid JSON in auth_json field: {auth_json}")
-
-        return ClaudeCodeMetadata(**processed_metadata)
+        return ClaudeCodeMetadata(**metadata_dict)
     elif tool_type == "composio":
         return ComposioMetadata(**metadata_dict)
     else:

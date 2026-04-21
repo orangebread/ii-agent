@@ -60,3 +60,11 @@ class ProviderConnectionRepository(BaseRepository[ProviderConnection]):
             .order_by(ProviderConnection.created_at.desc())
         )
         return list(result.scalars().all())
+
+    async def delete(
+        self,
+        db: AsyncSession,
+        connection: ProviderConnection,
+    ) -> None:
+        await db.delete(connection)
+        await db.flush()

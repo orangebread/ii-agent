@@ -6,7 +6,8 @@ import pytest
 
 from ii_agent.settings.mcp.exceptions import MCPOAuthError
 from ii_agent.settings.mcp.schemas import MCPServersConfig
-from ii_agent.settings.mcp.service import MCPSettingService
+from ii_agent.settings.mcp.service import MCPSettingService, _verify_claude_code_oauth_login_id
+from ii_agent.settings.provider_connections.service import ProviderConnectionAuthState
 
 
 class FakeMCPRepo:
@@ -14,6 +15,7 @@ class FakeMCPRepo:
         self.active = []
         self.created = []
         self.updated = []
+        self.items = {}
         self.by_tool = {}
 
     async def list_active_by_user(self, db, user_id):
@@ -21,16 +23,25 @@ class FakeMCPRepo:
 
     async def update(self, db, setting):
         self.updated.append(setting)
+        self.items[setting.id] = setting
+        if setting.mcp_metadata and "tool_type" in setting.mcp_metadata:
+            self.by_tool[setting.mcp_metadata["tool_type"]] = setting
         return setting
 
     async def create(self, db, setting):
         self.created.append(setting)
+        self.items[setting.id] = setting
+        if setting.mcp_metadata and "tool_type" in setting.mcp_metadata:
+            self.by_tool[setting.mcp_metadata["tool_type"]] = setting
         return setting
 
     async def get_by_user_and_tool_type(self, db, user_id, tool_type):
         return self.by_tool.get(tool_type)
 
     async def get_by_id_and_user(self, db, setting_id, user_id):
+        setting = self.items.get(str(setting_id)) or self.items.get(setting_id)
+        if setting and str(setting.user_id) == str(user_id):
+            return setting
         return None
 
     async def list_by_user(self, db, user_id, only_active=False, no_metadata=False):
@@ -64,6 +75,15 @@ class FakeProviderConnectionService:
     def get_credentials_dict(self, connection):
         stored = self.connections.get(str(connection.id))
         return stored["credentials"] if stored else {}
+
+    def describe_auth_state(self, connection):
+        credentials = self.get_credentials_dict(connection)
+        return ProviderConnectionAuthState(
+            has_stored_auth=bool(credentials),
+            is_usable=bool(credentials),
+            auth_status="connected" if credentials else "missing",
+            needs_reauth=not bool(credentials),
+        )
 
 
 @pytest.mark.asyncio
@@ -127,9 +147,14 @@ async def test_start_claude_code_oauth_returns_login_data(settings_factory):
 
     assert result.login_id
     assert result.authorization_url.startswith("https://claude.ai/oauth/authorize?")
-    assert "redirect_uri=http%3A%2F%2Flocalhost%3A1420%2Fclaude-code-callback" in (
-        result.authorization_url
+    assert "redirect_uri=https%3A%2F%2Fmcp.local%2Fcallback" in (result.authorization_url)
+    login_state = _verify_claude_code_oauth_login_id(
+        service._config,
+        result.login_id,
+        expected_user_id="u1",
     )
+    assert login_state["redirect_uri"] == "http://localhost:1420/claude-code-callback"
+    assert login_state["oauth_redirect_uri"] == "https://mcp.local/callback"
 
 
 @pytest.mark.asyncio

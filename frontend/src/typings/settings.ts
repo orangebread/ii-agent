@@ -78,6 +78,8 @@ interface MCPConfig {
 interface MCPMetadata {
     auth_json?: Record<string, any>
     has_auth?: boolean
+    auth_status?: string
+    needs_reauth?: boolean
     auth_mode?: string
     oauth_provider?: string
     oauth_connected_at?: string

@@ -27,6 +27,9 @@ interface SettingsState {
         id: string
         is_active: boolean
         updated_at: string
+        has_auth: boolean
+        auth_status?: string
+        needs_reauth: boolean
     }
     selectedGitHubRepository?: GitHubRepositoryContext
 }
@@ -134,6 +137,9 @@ const settingsSlice = createSlice({
                 id: string
                 is_active: boolean
                 updated_at: string
+                has_auth: boolean
+                auth_status?: string
+                needs_reauth: boolean
             }>
         ) => {
             state.claudeCodeConfig = action.payload

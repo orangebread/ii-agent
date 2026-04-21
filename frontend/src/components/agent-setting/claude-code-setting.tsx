@@ -10,6 +10,7 @@ import { toast } from 'sonner'
 import { Button } from '../ui/button'
 import { Icon } from '../ui/icon'
 import { Sheet, SheetClose, SheetContent, SheetHeader } from '../ui/sheet'
+import { Textarea } from '../ui/textarea'
 
 interface ClaudeCodeSettingProps {
     open: boolean
@@ -23,6 +24,63 @@ interface ClaudeCodeAuthMessage {
     state?: string
     error?: string
     errorDescription?: string
+}
+
+interface ParsedClaudeCodeManualInput {
+    code: string
+    legacyAuthorizationCode?: string
+    state?: string
+    errorDescription?: string
+}
+
+function parseClaudeCodeManualInput(
+    rawValue: string
+): ParsedClaudeCodeManualInput {
+    const trimmedValue = rawValue.trim()
+    const parsedUrl = tryParseUrl(trimmedValue)
+
+    if (parsedUrl) {
+        const error = parsedUrl.searchParams.get('error')
+        const errorDescription = parsedUrl.searchParams.get('error_description')
+        const code = parsedUrl.searchParams.get('code')
+        const state = parsedUrl.searchParams.get('state')
+
+        if (error) {
+            return {
+                code: '',
+                errorDescription:
+                    errorDescription ||
+                    'Claude Code authorization was cancelled.'
+            }
+        }
+
+        if (code) {
+            return {
+                code,
+                state: state || undefined
+            }
+        }
+    }
+
+    const hashSegments = trimmedValue.split('#')
+    if (hashSegments.length === 2 && hashSegments[0] && hashSegments[1]) {
+        return {
+            code: hashSegments[0],
+            legacyAuthorizationCode: trimmedValue
+        }
+    }
+
+    return {
+        code: trimmedValue
+    }
+}
+
+function tryParseUrl(value: string): URL | null {
+    try {
+        return new URL(value)
+    } catch {
+        return null
+    }
 }
 
 const ClaudeCodeSetting = ({
@@ -42,6 +100,9 @@ const ClaudeCodeSetting = ({
 
     const [oauthLoginId, setOauthLoginId] = useState<string | null>(null)
     const [isConnectingClaude, setIsConnectingClaude] = useState(false)
+    const [manualAuthorizationCode, setManualAuthorizationCode] = useState('')
+    const [isSubmittingManualCode, setIsSubmittingManualCode] = useState(false)
+    const [isDisconnectingClaude, setIsDisconnectingClaude] = useState(false)
     const popupRef = useRef<Window | null>(null)
 
     const callbackUrl = useMemo(
@@ -49,25 +110,32 @@ const ClaudeCodeSetting = ({
         []
     )
 
-    const handleCancel = useCallback(() => {
+    const resetClaudeFlow = useCallback(() => {
         popupRef.current?.close()
         popupRef.current = null
         setOauthLoginId(null)
         setIsConnectingClaude(false)
+    }, [])
+
+    const handleCancel = useCallback(() => {
+        resetClaudeFlow()
+        setManualAuthorizationCode('')
+        setIsSubmittingManualCode(false)
+        setIsDisconnectingClaude(false)
         onOpenChange(false)
-    }, [onOpenChange])
+    }, [onOpenChange, resetClaudeFlow])
 
     const completeClaudeSave = useCallback(() => {
         toast.success(
             'Claude Code configuration saved and activated successfully'
         )
-        popupRef.current?.close()
-        popupRef.current = null
-        setOauthLoginId(null)
-        setIsConnectingClaude(false)
+        resetClaudeFlow()
+        setManualAuthorizationCode('')
+        setIsSubmittingManualCode(false)
+        setIsDisconnectingClaude(false)
         onOpenChange(false)
         onSaveConfig(currentSettingData as ISetting)
-    }, [currentSettingData, onOpenChange, onSaveConfig])
+    }, [currentSettingData, onOpenChange, onSaveConfig, resetClaudeFlow])
 
     const handleLoginWithClaude = useCallback(async () => {
         try {
@@ -126,19 +194,21 @@ const ClaudeCodeSetting = ({
 
     useEffect(() => {
         if (!open) {
-            popupRef.current?.close()
-            popupRef.current = null
-            setOauthLoginId(null)
-            setIsConnectingClaude(false)
+            resetClaudeFlow()
+            setManualAuthorizationCode('')
+            setIsSubmittingManualCode(false)
+            setIsDisconnectingClaude(false)
         }
-    }, [open])
+    }, [open, resetClaudeFlow])
 
     useEffect(() => {
         if (!open) {
             return
         }
 
-        const handleMessage = async (event: MessageEvent<ClaudeCodeAuthMessage>) => {
+        const handleMessage = async (
+            event: MessageEvent<ClaudeCodeAuthMessage>
+        ) => {
             if (event.origin !== window.location.origin) {
                 return
             }
@@ -150,9 +220,7 @@ const ClaudeCodeSetting = ({
 
             if (payload.error) {
                 popupRef.current?.close()
-                popupRef.current = null
-                setOauthLoginId(null)
-                setIsConnectingClaude(false)
+                resetClaudeFlow()
                 toast.error(
                     payload.errorDescription ||
                         'Claude Code authorization was cancelled.'
@@ -162,9 +230,7 @@ const ClaudeCodeSetting = ({
 
             if (!payload.code || !payload.state || !oauthLoginId) {
                 popupRef.current?.close()
-                popupRef.current = null
-                setOauthLoginId(null)
-                setIsConnectingClaude(false)
+                resetClaudeFlow()
                 toast.error(
                     'Claude Code authorization response was incomplete. Start again.'
                 )
@@ -183,10 +249,7 @@ const ClaudeCodeSetting = ({
                 const apiError = error as {
                     response?: { data?: { detail?: string } }
                 }
-                popupRef.current?.close()
-                popupRef.current = null
-                setOauthLoginId(null)
-                setIsConnectingClaude(false)
+                resetClaudeFlow()
                 toast.error(
                     apiError.response?.data?.detail ||
                         'Failed to complete Claude Code connection'
@@ -196,11 +259,100 @@ const ClaudeCodeSetting = ({
 
         window.addEventListener('message', handleMessage)
         return () => window.removeEventListener('message', handleMessage)
-    }, [completeClaudeSave, oauthLoginId, open])
+    }, [completeClaudeSave, oauthLoginId, open, resetClaudeFlow])
+
+    const handleManualCodeSubmit = useCallback(async () => {
+        const trimmedCode = manualAuthorizationCode.trim()
+        if (!trimmedCode) {
+            toast.error(
+                'Paste the Authentication Code or callback URL from Anthropic.'
+            )
+            return
+        }
+
+        const parsedInput = parseClaudeCodeManualInput(trimmedCode)
+        if (parsedInput.errorDescription) {
+            toast.error(parsedInput.errorDescription)
+            return
+        }
+
+        const resolvedLoginId = oauthLoginId || parsedInput.state || null
+        if (!resolvedLoginId && !parsedInput.legacyAuthorizationCode) {
+            toast.error(
+                'Restart Claude login, then paste the Authentication Code while the login session is still active.'
+            )
+            return
+        }
+
+        try {
+            setIsSubmittingManualCode(true)
+
+            if (resolvedLoginId) {
+                await settingsService.completeClaudeCodeOAuth({
+                    login_id: resolvedLoginId,
+                    code: parsedInput.code,
+                    state: parsedInput.state || resolvedLoginId
+                })
+            } else {
+                await settingsService.configureClaudeCode({
+                    authorization_code: parsedInput.legacyAuthorizationCode
+                })
+            }
+
+            completeClaudeSave()
+        } catch (error: unknown) {
+            console.error('Error completing Claude Code manual login:', error)
+            const apiError = error as {
+                response?: { data?: { detail?: string } }
+            }
+            toast.error(
+                apiError.response?.data?.detail ||
+                    'Failed to complete Claude Code connection'
+            )
+        } finally {
+            setIsSubmittingManualCode(false)
+        }
+    }, [completeClaudeSave, manualAuthorizationCode])
+
+    const handleDisconnectClaude = useCallback(async () => {
+        try {
+            setIsDisconnectingClaude(true)
+            await settingsService.deleteClaudeCodeSettings()
+            toast.success('Claude Code disconnected successfully')
+            resetClaudeFlow()
+            setManualAuthorizationCode('')
+            onOpenChange(false)
+            onSaveConfig(currentSettingData as ISetting)
+        } catch (error: unknown) {
+            console.error('Error disconnecting Claude Code:', error)
+            const apiError = error as {
+                response?: { data?: { detail?: string } }
+            }
+            toast.error(
+                apiError.response?.data?.detail ||
+                    'Failed to disconnect Claude Code'
+            )
+        } finally {
+            setIsDisconnectingClaude(false)
+        }
+    }, [currentSettingData, onOpenChange, onSaveConfig, resetClaudeFlow])
+
+    const hasClaudeAuth = Boolean(claudeCodeConfig?.has_auth)
+    const needsReauth = Boolean(claudeCodeConfig?.needs_reauth)
+    const hasStoredClaudeConnection = Boolean(claudeCodeConfig?.id)
+    const authStatusLabel = hasClaudeAuth
+        ? 'Connected'
+        : needsReauth
+          ? 'Reconnect required'
+          : 'Not connected'
 
     const connectionCopy = oauthLoginId
-        ? 'Complete the Anthropic approval in the popup. We will finish the connection automatically.'
-        : 'Connect Claude Code with Anthropic OAuth. No manual code copy/paste is required.'
+        ? 'Complete the Anthropic approval in the popup. If Anthropic shows an Authentication Code page instead of returning automatically, paste the code or callback URL below.'
+        : needsReauth
+          ? 'Claude Code needs a fresh Anthropic login before it can run again.'
+          : hasClaudeAuth
+            ? 'Claude Code is connected. You can reconnect it or disconnect it to remove the stored Anthropic OAuth session.'
+            : 'Connect Claude Code with Anthropic OAuth. If Anthropic shows an Authentication Code page, paste the code or callback URL below to finish setup.'
 
     return (
         <Sheet open={open} onOpenChange={onOpenChange}>
@@ -264,6 +416,14 @@ const ClaudeCodeSetting = ({
                     </p>
 
                     <div className="mt-3 rounded-2xl border border-white/10 bg-black/20 p-4 space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm dark:text-white/80 font-medium">
+                                Status
+                            </p>
+                            <span className="rounded-full border border-white/10 px-3 py-1 text-xs dark:text-white/80">
+                                {authStatusLabel}
+                            </span>
+                        </div>
                         <p className="text-sm dark:text-white/80">
                             {connectionCopy}
                         </p>
@@ -271,13 +431,70 @@ const ClaudeCodeSetting = ({
                             type="button"
                             className="h-10 rounded-xl text-sm bg-[#191918] dark:bg-white text-white dark:text-black border-0 gap-x-2"
                             onClick={() => void handleLoginWithClaude()}
-                            disabled={isConnectingClaude || isSavingSetting}
+                            disabled={
+                                isConnectingClaude ||
+                                isSavingSetting ||
+                                isSubmittingManualCode ||
+                                isDisconnectingClaude
+                            }
                         >
                             <Icon name="claude" className="size-5" />
                             {oauthLoginId
                                 ? 'Restart Claude login'
-                                : 'Connect with Claude'}
+                                : hasClaudeAuth
+                                  ? 'Reconnect with Claude'
+                                  : 'Connect with Claude'}
                         </Button>
+                        <div className="space-y-3 rounded-xl border border-white/10 bg-black/20 p-3">
+                            <p className="text-sm dark:text-white/80">
+                                If the browser stops on Anthropic&apos;s
+                                Authentication Code page, paste the code or full
+                                callback URL here to finish setup manually.
+                            </p>
+                            <Textarea
+                                value={manualAuthorizationCode}
+                                onChange={(event) =>
+                                    setManualAuthorizationCode(
+                                        event.target.value
+                                    )
+                                }
+                                placeholder="Paste the Authentication Code or full callback URL from Anthropic"
+                                className="min-h-24"
+                            />
+                            <div className="flex flex-col gap-3 sm:flex-row">
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    className="h-10 rounded-xl text-sm"
+                                    onClick={() =>
+                                        void handleManualCodeSubmit()
+                                    }
+                                    disabled={
+                                        isSubmittingManualCode ||
+                                        isSavingSetting ||
+                                        !manualAuthorizationCode.trim()
+                                    }
+                                >
+                                    Finish with Auth Code
+                                </Button>
+                                {hasStoredClaudeConnection && (
+                                    <Button
+                                        type="button"
+                                        variant="outline"
+                                        className="h-10 rounded-xl text-sm border-red-500/30 text-red-500 hover:bg-red-500/10"
+                                        onClick={() =>
+                                            void handleDisconnectClaude()
+                                        }
+                                        disabled={
+                                            isDisconnectingClaude ||
+                                            isSavingSetting
+                                        }
+                                    >
+                                        Disconnect Claude
+                                    </Button>
+                                )}
+                            </div>
+                        </div>
                     </div>
 
                     {claudeCodeConfig?.updated_at && (
