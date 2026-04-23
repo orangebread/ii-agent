@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 from ii_agent.projects.databases.models import DatabaseSource, ProjectDatabase
 from ii_agent.projects.databases.repository import ProjectDatabaseRepository
+from ii_agent.projects.repository import ProjectRepository
+from ii_agent.projects.secrets.service import SecretService
 from ii_agent.core.container import get_app_container
 from ii_agent.core.db import get_db_session_local
 from ii_agent.agents.tools.base import TextContent, ToolResult
@@ -424,21 +426,16 @@ class FullStackInitTool(BaseSandboxTool):
             user_uuid = _uuid.UUID(user_id)
 
             async with get_db_session_local() as db:
-                project = await container.project_service.get_session_project_or_none(
+                secret_service = SecretService(
+                    project_repo=ProjectRepository(),
+                    config=container.config,
+                )
+                await secret_service.add_secrets(
                     db,
                     session_id=session_uuid,
                     user_id=user_uuid,
+                    secrets={"DATABASE_URL": database_url},
                 )
-                if not project:
-                    return
-
-                existing_secrets = project.secrets_json or {}
-                if not isinstance(existing_secrets, dict):
-                    existing_secrets = {}
-
-                existing_secrets["DATABASE_URL"] = database_url
-                project.secrets_json = existing_secrets
-                await db.flush()
 
             logger.info("Saved DATABASE_URL to project secrets for session {}", session_id)
         except Exception as exc:

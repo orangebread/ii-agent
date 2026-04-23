@@ -120,8 +120,11 @@ class AnthropicProvider(LLMClient):
             )
         else:
             # Support custom base_url for Anthropic-compatible APIs (e.g., Minimax)
+            api_key = llm_config.api_key.get_secret_value() if llm_config.api_key else None
+            auth_token = llm_config.auth_token.get_secret_value() if llm_config.auth_token else None
             client_kwargs = {
-                "api_key": llm_config.api_key.get_secret_value(),
+                "api_key": api_key,
+                "auth_token": auth_token,
                 "timeout": 60 * 5,
                 "max_retries": 3,
             }

@@ -13,6 +13,10 @@ def _build_test_app() -> FastAPI:
     async def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("boom")
+
     return app
 
 
@@ -41,3 +45,13 @@ def test_cors_preflight_allows_frontend_auth_headers():
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "http://localhost:1420"
     assert response.headers["access-control-allow-headers"] == "authorization,content-type"
+
+
+def test_cors_headers_are_preserved_on_internal_server_errors():
+    client = TestClient(_build_test_app())
+
+    response = client.get("/boom", headers={"Origin": "http://localhost:1420"})
+
+    assert response.status_code == 500
+    assert response.headers["access-control-allow-origin"] == "http://localhost:1420"
+    assert response.headers["access-control-allow-credentials"] == "true"

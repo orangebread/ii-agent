@@ -5,11 +5,11 @@ from ii_agent.agents.tools.base import BaseAgentTool, ToolResult
 from ii_agent.core.container import get_app_container
 from ii_agent.core.db import get_db_session_local
 from ii_agent.core.logger import logger
-from ii_agent.projects.databases.models import ProjectDatabase
-from ii_agent.projects.databases.repository import ProjectDatabaseRepository
-from ii_agent.projects.databases.types import DatabaseSource
+from ii_agent.projects.databases.service import DatabaseService
 from ii_agent.projects.exceptions import ProjectNotFoundError
 from ii_agent.projects.repository import ProjectRepository
+from ii_agent.projects.secrets.env_sync_service import SandboxEnvSyncService
+from ii_agent.projects.secrets.orchestrator import ProjectSecretOrchestrator
 from ii_agent.projects.secrets.service import SecretService
 
 if TYPE_CHECKING:
@@ -126,49 +126,47 @@ class AddUserEnvTool(BaseAgentTool):
 
             user_uuid = user_id if isinstance(user_id, uuid.UUID) else uuid.UUID(str(user_id))
 
-            # Sync DATABASE_URL to ProjectDatabases table if provided
-            database_url = secrets_dict.get("DATABASE_URL")
-            if database_url and isinstance(database_url, str):
-                db_repo = ProjectDatabaseRepository()
-                async with get_db_session_local() as db:
-                    existing = await db_repo.get_active_by_session_id(db, session_uuid)
-                    if existing:
-                        existing.connection_string = database_url
-                        existing.source = DatabaseSource.USER
-                    else:
-                        new_record = ProjectDatabase(
-                            session_id=session_uuid,
-                            source=DatabaseSource.USER,
-                            connection_string=database_url,
-                        )
-                        await db_repo.save(db, new_record)
-                    await db.commit()
-
-            # Save secrets to project via SecretService
-            secret_svc = SecretService(
-                project_repo=ProjectRepository(),
-                config=container.config,
+            secret_orchestrator = ProjectSecretOrchestrator(
+                secret_service=SecretService(
+                    project_repo=ProjectRepository(),
+                    config=container.config,
+                ),
+                database_service=DatabaseService(
+                    project_repo=ProjectRepository(),
+                    config=container.config,
+                ),
+                env_sync_service=SandboxEnvSyncService(
+                    sandbox_service=container.sandbox_service,
+                ),
             )
             async with get_db_session_local() as db:
-                project = await secret_svc.add_secrets(
+                result = await secret_orchestrator.add_secrets(
                     db,
                     session_id=session_uuid,
                     user_id=user_uuid,
                     secrets=secrets_dict,
+                    project_path=project_dir,
+                    sync_policy="ensure",
                 )
-                await db.commit()
 
-            synced = True
+            restart_note = ""
+            if result.restart_required:
+                restart_note = (
+                    " Existing terminals or development servers started before this change may "
+                    "need to be restarted to pick up the new environment."
+                )
 
             return ToolResult(
                 llm_content=(
-                    f"Added {len(secrets_dict)} secret(s) to {project_dir or project.project_path}."
+                    f"Added {len(secrets_dict)} secret(s) to {result.project_path_used}."
+                    f"{restart_note}"
                 ),
                 user_display_content={
-                    "project_directory": project_dir or project.project_path,
+                    "project_directory": result.project_path_used,
                     "secrets": {key: "***" for key in secrets_dict.keys()},
                     "keys": list(secrets_dict.keys()),
-                    "synced_to_sandbox": synced,
+                    "synced_to_sandbox": result.runtime_synced,
+                    "restart_required": result.restart_required,
                 },
                 is_error=False,
             )

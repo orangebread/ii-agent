@@ -1,9 +1,13 @@
 import { ACCESS_TOKEN } from '@/constants/auth'
+import {
+    getPreferredModelIdForFeature,
+    getSelectableModels
+} from '@/constants/models'
 import { authService } from '@/services/auth.service'
 import { settingsService } from '@/services/settings.service'
 import {
-    selectAvailableModels,
     selectSelectedModel,
+    selectSelectedFeature,
     setAvailableModels,
     setSelectedModel,
     store,
@@ -22,6 +26,7 @@ interface AuthContextType {
     isAuthenticated: boolean
     completeTokenLogin: (accessToken: string) => Promise<void>
     loginWithAuthCode: (authCode: string) => Promise<void>
+    refreshAvailableModels: () => Promise<void>
     logout: () => void
     isLoading: boolean
 }
@@ -38,23 +43,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const fetchAvailableModels = useCallback(async () => {
         try {
             const data = await settingsService.getAvailableModels()
-            dispatch(setAvailableModels(data?.models || []))
+            const selectableModels = getSelectableModels(data?.models || [])
+            dispatch(setAvailableModels(selectableModels))
 
-            if (data?.models?.length) {
-                const firstModel = data.models[0]
-
-                const state = store.getState()
-                const currentSelectedModel = selectSelectedModel(state)
-                const currentAvailableModels = selectAvailableModels(state)
-
-                const selectedModelStillAvailable = currentAvailableModels.find(
-                    (model) => model.id === currentSelectedModel
-                )
-
-                if (!currentSelectedModel || !selectedModelStillAvailable) {
-                    dispatch(setSelectedModel(firstModel.id))
-                }
-            }
+            const state = store.getState()
+            const currentSelectedModel = selectSelectedModel(state)
+            const selectedFeature = selectSelectedFeature(state)
+            const nextSelectedModelId = getPreferredModelIdForFeature(
+                selectableModels,
+                selectedFeature,
+                currentSelectedModel
+            )
+            dispatch(setSelectedModel(nextSelectedModelId))
         } catch (error) {
             console.log('Failed to fetch llm models', error)
         }
@@ -143,6 +143,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated,
         completeTokenLogin,
         loginWithAuthCode,
+        refreshAvailableModels: fetchAvailableModels,
         logout,
         isLoading
     }

@@ -181,9 +181,19 @@ export function useQuestionHandlers() {
 
         // Check if a model is selected
         if (!selectedModel || !selectedModel.id) {
-            toast.error(
-                'Please select a model before submitting your question.'
-            )
+            if (selectedFeature === AGENT_TYPE.CODEX) {
+                toast.error(
+                    'Select a Codex-backed model in Agent Settings before submitting your question.'
+                )
+            } else if (selectedFeature === AGENT_TYPE.CLAUDE_CODE) {
+                toast.error(
+                    'Select a Claude Code-backed model in Agent Settings before submitting your question.'
+                )
+            } else {
+                toast.error(
+                    'Please select a model before submitting your question.'
+                )
+            }
             dispatch(setLoading(false))
             return
         }

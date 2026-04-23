@@ -33,6 +33,8 @@ from ii_agent.agents.sandboxes.types import SandboxProviderType, SandboxStatus
 from ii_agent.core.config.settings import Settings
 from ii_agent.core.db import get_db_session_local
 from ii_agent.core.logger import logger
+from ii_agent.projects.secrets.env_sync_service import SandboxEnvSyncService
+from ii_agent.projects.secrets.runtime_state import ProjectSecretRuntimeStateService
 from ii_agent.sessions.repository import SessionRepository
 
 
@@ -54,10 +56,12 @@ class SandboxService:
         sandbox_repo: SandboxRepository,
         session_repo: SessionRepository,
         config: Settings,
+        secret_runtime_state_service: ProjectSecretRuntimeStateService | None = None,
     ) -> None:
         self._sandbox_repo = sandbox_repo
         self._session_repo = session_repo
         self._config = config
+        self._secret_runtime_state_service = secret_runtime_state_service
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -99,17 +103,31 @@ class SandboxService:
         else:
             sandbox_mgr = await self._create_provider(record, metadata)
 
-        # 5. Persist provider state
+        # 5. Merge DB-owned and provider-owned metadata before persisting.
+        merged_provider_data = self._merge_provider_data(record.provider_data, sandbox_mgr.metadata)
+        sandbox_mgr.metadata = merged_provider_data
+
+        if self._secret_runtime_state_service is not None:
+            merged_provider_data = await self._reconcile_secret_runtime_state(
+                db=db,
+                session_id=record.session_id,
+                user_id=user_id,
+                sandbox=sandbox_mgr,
+                provider_data=merged_provider_data,
+            )
+            sandbox_mgr.metadata = merged_provider_data
+
+        # 6. Persist provider state
         await self._sandbox_repo.update_provider_info(
             db,
             record.id,
             status=sandbox_mgr.status,
             provider_sandbox_id=sandbox_mgr.provider_sandbox_id,
             expired_at=sandbox_mgr.expired_at,
-            provider_data=sandbox_mgr.metadata,
+            provider_data=merged_provider_data,
         )
 
-        # 6. Configure MCP on new sandboxes
+        # 7. Configure MCP on new sandboxes
         if is_new or not record.provider_sandbox_id:
             await self._configure_mcp(sandbox_mgr, user_id, db)
 
@@ -238,10 +256,17 @@ class SandboxService:
     async def load_provider_data(
         self,
         sandbox_id: uuid.UUID,
+        db: AsyncSession | None = None,
     ) -> dict[str, Any]:
         """Load provider metadata for a sandbox."""
-        async with get_db_session_local() as db:
+        if db is not None:
             record = await self._sandbox_repo.get_by_id(db, sandbox_id)
+            if record is None:
+                raise SandboxNotFoundException(str(sandbox_id))
+            return dict(record.provider_data or {})
+
+        async with get_db_session_local() as local_db:
+            record = await self._sandbox_repo.get_by_id(local_db, sandbox_id)
             if record is None:
                 raise SandboxNotFoundException(str(sandbox_id))
             return dict(record.provider_data or {})
@@ -250,11 +275,22 @@ class SandboxService:
         self,
         sandbox_id: uuid.UUID,
         provider_data: dict[str, Any],
+        db: AsyncSession | None = None,
     ) -> None:
         """Persist provider metadata for a sandbox."""
-        async with get_db_session_local() as db:
+        if db is not None:
             record = await self._sandbox_repo.update_provider_info(
                 db,
+                sandbox_id,
+                provider_data=provider_data,
+            )
+            if record is None:
+                raise SandboxNotFoundException(str(sandbox_id))
+            return
+
+        async with get_db_session_local() as local_db:
+            record = await self._sandbox_repo.update_provider_info(
+                local_db,
                 sandbox_id,
                 provider_data=provider_data,
             )
@@ -681,6 +717,53 @@ class SandboxService:
         if require_provider_sandbox_id:
             return None
         return record
+
+    @staticmethod
+    def _merge_provider_data(
+        persisted_provider_data: dict[str, Any] | None,
+        runtime_provider_data: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        merged = dict(persisted_provider_data or {})
+        merged.update(runtime_provider_data or {})
+        return merged
+
+    async def _reconcile_secret_runtime_state(
+        self,
+        *,
+        db: AsyncSession,
+        session_id: uuid.UUID,
+        user_id: uuid.UUID,
+        sandbox: Sandbox,
+        provider_data: dict[str, Any],
+    ) -> dict[str, Any]:
+        runtime_state = await self._secret_runtime_state_service.get_runtime_state(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        if runtime_state is None:
+            if not SandboxEnvSyncService.get_sync_metadata(provider_data):
+                return provider_data
+            target_state = SandboxEnvSyncService.build_target_state(
+                secrets={},
+                project_path=None,
+                database_url=None,
+            )
+        else:
+            target_state = SandboxEnvSyncService.build_target_state(
+                secrets=runtime_state.secrets,
+                project_path=runtime_state.project_path,
+                database_url=runtime_state.database_url,
+            )
+        if SandboxEnvSyncService.is_sync_metadata_current(provider_data, target_state):
+            return provider_data
+
+        await SandboxEnvSyncService.apply_target_state(
+            sandbox=sandbox,
+            target_state=target_state,
+            previous_project_path=SandboxEnvSyncService.get_synced_project_path(provider_data),
+        )
+        return SandboxEnvSyncService.attach_sync_metadata(provider_data, target_state)
 
     # ── MCP configuration ─────────────────────────────────────────────────
 

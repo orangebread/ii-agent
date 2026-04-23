@@ -8,6 +8,7 @@ from uuid import UUID
 from unittest.mock import AsyncMock
 
 import pytest
+from pydantic import ValidationError as PydanticValidationError
 
 from ii_agent.projects import router as project_router
 from ii_agent.projects.databases.router import (
@@ -86,11 +87,14 @@ def _project_for_session_response(
 async def test_router_get_session_project_forwards_to_service():
     service = AsyncMock()
     service.get_session_project.return_value = _project_for_session_response()
+    database_service = AsyncMock()
+    database_service.get_session_db_payload.return_value = {"url": "postgres://runtime"}
 
     result = await project_router.get_session_project(
         SESSION_ID,
         _user(USER_ID),
         service,
+        database_service,
         None,
     )
 
@@ -99,6 +103,7 @@ async def test_router_get_session_project_forwards_to_service():
         session_id=SESSION_ID,
         user_id=USER_ID,
     )
+    database_service.get_session_db_payload.assert_awaited_once_with(None, SESSION_ID)
     assert result.id == UUID(PROJECT_ID)
 
 
@@ -240,52 +245,81 @@ async def test_secrets_router_get_secrets_maps_project_payload():
 
 
 @pytest.mark.asyncio
-async def test_secrets_router_set_secrets_delegates_sync_and_returns_payload():
+async def test_secrets_router_set_secrets_delegates_to_orchestrator_and_returns_payload():
     project = _project_for_session_response(session_id="00000000-0000-4000-8000-000000000002")
-    secret_service = AsyncMock()
-    secret_service.add_secrets.return_value = project
-
-    database_service = AsyncMock()
-    sandbox_env_sync = AsyncMock()
+    secret_orchestrator = AsyncMock()
+    secret_orchestrator.add_secrets.return_value = SimpleNamespace(
+        project=project,
+        secrets={"env": "local"},
+        runtime_synced=False,
+        restart_required=False,
+    )
 
     payload = ProjectSecretsRequest(secrets={"API_KEY": "abc"})
     result = await set_session_project_secrets(
         project.session_id,
         payload,
         _user(USER_ID),
-        secret_service,
-        database_service,
-        sandbox_env_sync,
+        secret_orchestrator,
         None,
     )
 
-    secret_service.add_secrets.assert_awaited_once_with(
+    secret_orchestrator.add_secrets.assert_awaited_once_with(
         None,
         session_id=project.session_id,
         user_id=USER_ID,
         secrets={"API_KEY": "abc"},
-    )
-    database_service.upsert_database_from_url.assert_not_called()
-    sandbox_env_sync.sync_env_files.assert_awaited_once_with(
-        None,
-        session_id=project.session_id,
-        secrets={"env": "local"},
-        project_path=project.project_path,
-        database_url="postgres://localhost",
+        sync_policy="existing",
     )
     assert result.project_id == UUID(project.id)
+    assert result.secrets == {"env": "local"}
+    assert result.restart_required is False
 
 
 @pytest.mark.asyncio
-async def test_secrets_router_replace_secrets_delegates_sync_and_returns_payload():
+async def test_secrets_router_set_secrets_preserves_database_url_payload():
+    project = _project_for_session_response(session_id="00000000-0000-4000-8000-000000000022")
+    project.secrets_json = {"DATABASE_URL": "postgres://db.example/app"}
+    secret_orchestrator = AsyncMock()
+    secret_orchestrator.add_secrets.return_value = SimpleNamespace(
+        project=project,
+        secrets={"DATABASE_URL": "postgres://canonical-db"},
+        runtime_synced=True,
+        restart_required=True,
+    )
+
+    payload = ProjectSecretsRequest(secrets={"DATABASE_URL": "postgres://db.example/app"})
+    result = await set_session_project_secrets(
+        project.session_id,
+        payload,
+        _user(USER_ID),
+        secret_orchestrator,
+        None,
+    )
+
+    secret_orchestrator.add_secrets.assert_awaited_once_with(
+        None,
+        session_id=project.session_id,
+        user_id=USER_ID,
+        secrets={"DATABASE_URL": "postgres://db.example/app"},
+        sync_policy="existing",
+    )
+    assert result.project_id == UUID(project.id)
+    assert result.secrets == {"DATABASE_URL": "postgres://canonical-db"}
+    assert result.restart_required is True
+
+
+@pytest.mark.asyncio
+async def test_secrets_router_replace_secrets_delegates_to_orchestrator():
     project = _project_for_session_response(session_id="00000000-0000-4000-8000-000000000003")
     project.secrets_json = {"API_KEY": "abc", "DATABASE_URL": "postgres://db.example/app"}
-
-    secret_service = AsyncMock()
-    secret_service.replace_session_project_secrets.return_value = project
-
-    database_service = AsyncMock()
-    sandbox_env_sync = AsyncMock()
+    secret_orchestrator = AsyncMock()
+    secret_orchestrator.replace_secrets.return_value = SimpleNamespace(
+        project=project,
+        secrets={"API_KEY": "abc", "DATABASE_URL": "postgres://canonical-db"},
+        runtime_synced=True,
+        restart_required=False,
+    )
 
     payload = ProjectSecretsRequest(
         secrets={
@@ -297,13 +331,11 @@ async def test_secrets_router_replace_secrets_delegates_sync_and_returns_payload
         project.session_id,
         payload,
         _user(USER_ID),
-        secret_service,
-        database_service,
-        sandbox_env_sync,
+        secret_orchestrator,
         None,
     )
 
-    secret_service.replace_session_project_secrets.assert_awaited_once_with(
+    secret_orchestrator.replace_secrets.assert_awaited_once_with(
         None,
         session_id=project.session_id,
         user_id=USER_ID,
@@ -311,59 +343,58 @@ async def test_secrets_router_replace_secrets_delegates_sync_and_returns_payload
             "API_KEY": "abc",
             "DATABASE_URL": "postgres://db.example/app",
         },
-    )
-    database_service.upsert_database_from_url.assert_awaited_once_with(
-        None,
-        session_id=project.session_id,
-        connection_string="postgres://db.example/app",
-    )
-    sandbox_env_sync.sync_env_files.assert_awaited_once_with(
-        None,
-        session_id=project.session_id,
-        secrets={
-            "API_KEY": "abc",
-            "DATABASE_URL": "postgres://db.example/app",
-        },
-        project_path=project.project_path,
-        database_url="postgres://localhost",
+        sync_policy="existing",
     )
     assert result.project_id == UUID(project.id)
+    assert result.secrets == {"API_KEY": "abc", "DATABASE_URL": "postgres://canonical-db"}
+    assert result.restart_required is False
 
 
 @pytest.mark.asyncio
-async def test_secrets_router_delete_secrets_delegates_sync_and_returns_payload():
+async def test_secrets_router_delete_secrets_delegates_to_orchestrator():
     project = _project_for_session_response(session_id="00000000-0000-4000-8000-000000000004")
     project.secrets_json = {"OTHER": "value"}
-
-    secret_service = AsyncMock()
-    secret_service.delete_secrets.return_value = project
-
-    sandbox_env_sync = AsyncMock()
+    secret_orchestrator = AsyncMock()
+    secret_orchestrator.delete_secrets.return_value = SimpleNamespace(
+        project=project,
+        secrets={"OTHER": "value"},
+        runtime_synced=False,
+        restart_required=True,
+    )
 
     payload = ProjectSecretsDeleteRequest(secret_keys=["API_KEY"])
     result = await delete_session_project_secrets(
         project.session_id,
         payload,
         _user(USER_ID),
-        secret_service,
-        sandbox_env_sync,
+        secret_orchestrator,
         None,
     )
 
-    secret_service.delete_secrets.assert_awaited_once_with(
+    secret_orchestrator.delete_secrets.assert_awaited_once_with(
         None,
         session_id=project.session_id,
         user_id=USER_ID,
         secret_keys=["API_KEY"],
-    )
-    sandbox_env_sync.sync_env_files.assert_awaited_once_with(
-        None,
-        session_id=project.session_id,
-        secrets={"OTHER": "value"},
-        project_path=project.project_path,
-        database_url="postgres://localhost",
+        sync_policy="existing",
     )
     assert result.project_id == UUID(project.id)
+    assert result.secrets == {"OTHER": "value"}
+    assert result.restart_required is True
+
+
+def test_project_secrets_request_rejects_invalid_env_var_names():
+    with pytest.raises(PydanticValidationError, match="Invalid environment variable name"):
+        ProjectSecretsRequest(secrets={"BAD-NAME": "abc"})
+
+    with pytest.raises(PydanticValidationError, match="Invalid environment variable name"):
+        ProjectSecretsRequest(secrets={"ALSO\nBAD": "abc"})
+
+
+def test_project_secrets_delete_request_allows_legacy_invalid_key_names():
+    payload = ProjectSecretsDeleteRequest(secret_keys=["BAD-NAME", "ALSO\nBAD", ""])
+
+    assert payload.secret_keys == ["BAD-NAME", "ALSO\nBAD", ""]
 
 
 @pytest.mark.asyncio

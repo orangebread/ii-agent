@@ -3,6 +3,7 @@ import { useLocation, useParams } from 'react-router'
 
 import { type MiniTool } from '@/constants/media-tools'
 import { getMediaTypeConfig } from '@/constants/media-type-config'
+import { getPreferredModelIdForFeature } from '@/constants/models'
 import { FEATURES } from '@/constants/tool'
 import { useChatMediaPreference } from '@/hooks/use-chat-media-preference'
 import { useIsMobile } from '@/hooks/use-mobile'
@@ -38,6 +39,7 @@ import {
     setQuestionMode,
     setRequireClearFiles,
     setSelectedFeature,
+    setSelectedModel,
     setSelectedSlideTemplate,
     setShouldFocusInput,
     useAppDispatch,
@@ -182,6 +184,18 @@ const QuestionInput = ({
     const isCreatingSession = useAppSelector(
         (state) => state.ui.isCreatingSession
     )
+
+    useEffect(() => {
+        const nextSelectedModelId = getPreferredModelIdForFeature(
+            availableModels,
+            selectedFeature,
+            selectedModel
+        )
+        if (nextSelectedModelId !== selectedModel) {
+            dispatch(setSelectedModel(nextSelectedModelId))
+        }
+    }, [availableModels, dispatch, selectedFeature, selectedModel])
+
     const {
         chatMediaPreference,
         hasMiniToolSelection,

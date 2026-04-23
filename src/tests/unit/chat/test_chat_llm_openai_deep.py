@@ -32,7 +32,7 @@ from ii_agent.chat.types import (
     ToolResult,
 )
 
-_SESSION_ID = "deep-test-session-001"
+_SESSION_ID = "00000000-0000-4000-8000-000000000321"
 
 
 def _make_llm_config(
@@ -365,7 +365,7 @@ class TestConvertMessagesToolResultDeep:
             "c1",
             "tool",
             StorybookProgressContent(
-                storybook_id="sb1",
+                storybook_id="00000000-0000-4000-8000-000000000421",
                 storybook_name="Book",
                 total_pages=10,
                 completed_pages=5,
@@ -378,12 +378,18 @@ class TestConvertMessagesToolResultDeep:
         result = provider._convert_messages([msg], _make_empty_container_file())
         data = json.loads(result[0]["output"])
         assert data["type"] == "storybook_progress"
-        assert data["storybook_id"] == "sb1"
+        assert data["storybook_id"] == "00000000-0000-4000-8000-000000000421"
 
     def test_storybook_result_content_converted(self):
         provider = _make_provider()
         msg = _make_tool_result_message(
-            "c1", "tool", StorybookResultContent(storybook_id="sb2", storybook_name="B2", pages=[])
+            "c1",
+            "tool",
+            StorybookResultContent(
+                storybook_id="00000000-0000-4000-8000-000000000422",
+                storybook_name="B2",
+                pages=[],
+            ),
         )
         result = provider._convert_messages([msg], _make_empty_container_file())
         data = json.loads(result[0]["output"])
@@ -675,6 +681,60 @@ class TestOpenAIProviderSendDeep:
         input_msgs = captured_params.get("input", [])
         system_msgs = [m for m in input_msgs if isinstance(m, dict) and m.get("role") == "system"]
         assert len(system_msgs) == 0
+        assert "Be helpful" in captured_params["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_send_codex_reasoning_uses_stateless_contract(self):
+        provider = _make_provider(
+            _make_llm_config(
+                model="gpt-5",
+                base_url="https://chatgpt.com/backend-api/codex",
+            )
+        )
+        assistant_msg = Message(
+            id=uuid.uuid4(),
+            session_id=_SESSION_ID,
+            role=MessageRole.ASSISTANT,
+            parts=[TextContent(text="previous response")],
+            provider_metadata={"OpenAI": {"response_id": "resp_abc123"}},
+        )
+        system_msg = Message(
+            id=uuid.uuid4(),
+            session_id=_SESSION_ID,
+            role=MessageRole.SYSTEM,
+            parts=[TextContent(text="Be helpful")],
+        )
+
+        mock_response = MagicMock()
+        mock_response.output = []
+        mock_response.status = "completed"
+        mock_response.usage = None
+
+        captured_params = {}
+
+        async def capture_create(**kwargs):
+            captured_params.update(kwargs)
+            return mock_response
+
+        with patch.object(provider.client.responses, "create", new=capture_create):
+            await provider.send(
+                messages=[
+                    system_msg,
+                    _make_user_message("Hello"),
+                    assistant_msg,
+                    _make_user_message("Next"),
+                ],
+                session_id=_SESSION_ID,
+                provider_options={"openai": {"max_output_tokens": 1024}},
+            )
+
+        assert captured_params["store"] is False
+        assert "reasoning.encrypted_content" in captured_params["include"]
+        assert "previous_response_id" not in captured_params
+        assert "max_output_tokens" not in captured_params
+        assert "Be helpful" in captured_params["instructions"]
+        input_msgs = captured_params["input"]
+        assert all(msg.get("role") != "system" for msg in input_msgs if isinstance(msg, dict))
 
     @pytest.mark.asyncio
     async def test_send_accepts_provider_options_keyword(self):
@@ -730,45 +790,38 @@ class TestOpenAIProviderStreamDeep:
         """Test that text delta events are properly emitted."""
 
         provider = self._make_streaming_provider()
+        from openai.types.responses import ResponseTextDeltaEvent
 
-        mock_text_delta = MagicMock()
-        mock_text_delta.type = "response.output_text.delta"
-        mock_text_delta.delta = "Hello"
-
-        mock_done = MagicMock()
-        mock_done.type = "response.completed"
-        mock_done.response = MagicMock()
-        mock_done.response.status = "completed"
-        mock_done.response.output = []
-        mock_done.response.usage = None
+        mock_text_delta = ResponseTextDeltaEvent(
+            content_index=0,
+            delta="Hello",
+            item_id="item_123",
+            logprobs=[],
+            output_index=0,
+            sequence_number=1,
+            type="response.output_text.delta",
+        )
 
         async def fake_stream():
             yield mock_text_delta
-            yield mock_done
 
         with patch(
             "ii_agent.chat.llm.openai.OpenAIProvider._get_files_within_session",
             new=AsyncMock(return_value=_make_empty_container_file()),
         ):
-            with patch.object(provider.client.responses, "stream") as mock_stream_ctx:
-                stream_mock = MagicMock()
-                stream_mock.__aenter__ = AsyncMock(return_value=stream_mock)
-                stream_mock.__aexit__ = AsyncMock(return_value=None)
-                stream_mock.__aiter__ = MagicMock(return_value=iter([mock_text_delta, mock_done]))
-                mock_stream_ctx.return_value = stream_mock
-
+            with patch.object(
+                provider.client.responses,
+                "create",
+                new=AsyncMock(return_value=fake_stream()),
+            ):
                 events = []
-                try:
-                    async for event in provider.stream(
-                        messages=[_make_user_message("Hello")],
-                        session_id=_SESSION_ID,
-                    ):
-                        events.append(event)
-                except Exception:
-                    pass  # Some streams may fail at final message retrieval
+                async for event in provider.stream(
+                    messages=[_make_user_message("Hello")],
+                    session_id=_SESSION_ID,
+                ):
+                    events.append(event)
 
-        # At minimum the function should have been called without import errors
-        assert provider is not None
+        assert events
 
     @pytest.mark.asyncio
     async def test_stream_previous_response_id_extracted(self):
@@ -780,7 +833,7 @@ class TestOpenAIProviderStreamDeep:
             session_id=_SESSION_ID,
             role=MessageRole.ASSISTANT,
             parts=[TextContent(text="previous response")],
-            provider_metadata={"openai": {"response_id": "resp_abc123"}},
+            provider_metadata={"OpenAI": {"response_id": "resp_abc123"}},
         )
 
         captured_params = {}
@@ -794,13 +847,8 @@ class TestOpenAIProviderStreamDeep:
             "ii_agent.chat.llm.openai.OpenAIProvider._get_files_within_session",
             new=AsyncMock(return_value=_make_empty_container_file()),
         ):
-            with patch.object(provider.client.responses, "stream") as mock_stream:
-                mock_ctx = MagicMock()
-                mock_ctx.__aenter__ = AsyncMock(side_effect=RuntimeError("intentional stop"))
-                mock_ctx.__aexit__ = AsyncMock(return_value=None)
-                mock_stream.return_value = mock_ctx
-
-                try:
+            with patch.object(provider.client.responses, "create", new=fake_create):
+                with pytest.raises(RuntimeError, match="stop early"):
                     async for _ in provider.stream(
                         messages=[
                             _make_user_message("Hello"),
@@ -810,15 +858,64 @@ class TestOpenAIProviderStreamDeep:
                         session_id=_SESSION_ID,
                     ):
                         pass
-                except Exception:
+
+        assert captured_params["previous_response_id"] == "resp_abc123"
+
+    @pytest.mark.asyncio
+    async def test_stream_codex_reasoning_uses_stateless_contract(self):
+        provider = _make_provider(
+            _make_llm_config(
+                model="gpt-5",
+                base_url="https://chatgpt.com/backend-api/codex",
+            )
+        )
+        assistant_msg = Message(
+            id=uuid.uuid4(),
+            session_id=_SESSION_ID,
+            role=MessageRole.ASSISTANT,
+            parts=[TextContent(text="previous response")],
+            provider_metadata={"OpenAI": {"response_id": "resp_abc123"}},
+        )
+        system_msg = Message(
+            id=uuid.uuid4(),
+            session_id=_SESSION_ID,
+            role=MessageRole.SYSTEM,
+            parts=[TextContent(text="Be helpful")],
+        )
+        captured_params = {}
+
+        async def fake_stream():
+            if False:
+                yield None
+
+        async def capture_create(**kwargs):
+            captured_params.update(kwargs)
+            return fake_stream()
+
+        with patch(
+            "ii_agent.chat.llm.openai.OpenAIProvider._get_files_within_session",
+            new=AsyncMock(return_value=_make_empty_container_file()),
+        ):
+            with patch.object(provider.client.responses, "create", new=capture_create):
+                async for _ in provider.stream(
+                    messages=[
+                        system_msg,
+                        _make_user_message("Hello"),
+                        assistant_msg,
+                        _make_user_message("Next"),
+                    ],
+                    session_id=_SESSION_ID,
+                    provider_options={"openai": {"max_output_tokens": 1024}},
+                ):
                     pass
 
-        # Verify the stream was called with previous_response_id
-        call_kwargs = mock_stream.call_args
-        if call_kwargs:
-            kwargs = call_kwargs[1] if call_kwargs[1] else {}
-            if "previous_response_id" in kwargs:
-                assert kwargs["previous_response_id"] == "resp_abc123"
+        assert captured_params["store"] is False
+        assert "reasoning.encrypted_content" in captured_params["include"]
+        assert "previous_response_id" not in captured_params
+        assert "max_output_tokens" not in captured_params
+        assert "Be helpful" in captured_params["instructions"]
+        input_msgs = captured_params["input"]
+        assert all(msg.get("role") != "system" for msg in input_msgs if isinstance(msg, dict))
 
 
 # ---------------------------------------------------------------------------
@@ -975,6 +1072,8 @@ class TestOpenAIResponseParamsDeep:
         assert "tools" not in d
         assert "temperature" not in d
         assert "reasoning" not in d
+        assert "store" not in d
+        assert "include" not in d
         assert "previous_response_id" not in d
 
     def test_reasoning_field_included(self):

@@ -163,6 +163,7 @@ class BaseCommandHandler(ABC, Generic[TContent]):
                 agent_type=query_command.agent_type,
                 credit_service=container.credit_service,
                 model_setting_service=container.model_setting_service,
+                mcp_setting_service=container.mcp_setting_service,
             )
             await db.commit()
 
@@ -170,6 +171,8 @@ class BaseCommandHandler(ABC, Generic[TContent]):
             error_map = {
                 "session_not_found": ErrorCode.SESSION_NOT_FOUND,
                 "insufficient_credits": ErrorCode.INSUFFICIENT_CREDITS,
+                "missing_credentials": ErrorCode.MISSING_CREDENTIALS,
+                "session_error": ErrorCode.SESSION_ERROR,
             }
             await self._send_error_event(
                 session_info.id,

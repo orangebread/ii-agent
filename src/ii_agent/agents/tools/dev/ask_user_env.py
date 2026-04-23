@@ -5,6 +5,11 @@ from ii_agent.core.container import get_app_container
 from ii_agent.core.db import get_db_session_local
 from ii_agent.core.logger import logger
 from ii_agent.projects.exceptions import ProjectNotFoundError
+from ii_agent.projects.repository import ProjectRepository
+from ii_agent.projects.databases.service import DatabaseService
+from ii_agent.projects.secrets.env_sync_service import SandboxEnvSyncService
+from ii_agent.projects.secrets.orchestrator import ProjectSecretOrchestrator
+from ii_agent.projects.secrets.service import SecretService
 
 if TYPE_CHECKING:
     from ii_agent.agents.agent import IIAgent
@@ -17,8 +22,8 @@ DESCRIPTION = """Requests environment variables or secrets from the user via a U
 Usage:
 - Call this tool when the project needs API keys, tokens, or other secrets that the user must provide.
 - The agent loop pauses before execution and the frontend shows a secrets input form.
-- The frontend saves the secrets and syncs env files before resuming the run.
-- After resume, this tool returns a success acknowledgement only.
+- When the user confirms, the backend persists the provided secrets, syncs runtime env files,
+  and then continues the run.
 
 Each requested key should include:
 - `key`: The environment variable name (e.g., OPENAI_API_KEY)
@@ -83,6 +88,11 @@ class AskUserEnvTool(BaseAgentTool):
             for item in requested_keys
             if isinstance(item, dict) and isinstance(item.get("key"), str) and item.get("key")
         ]
+        secrets = {
+            key: str(tool_input[key])
+            for key in keys_list
+            if key in tool_input and tool_input[key] is not None and str(tool_input[key])
+        }
 
         session_id = getattr(self._agent, "session_id", None)
         user_id = getattr(self._agent, "user_id", None)
@@ -91,6 +101,12 @@ class AskUserEnvTool(BaseAgentTool):
             return ToolResult(
                 llm_content="No active session found for ask_user_env.",
                 user_display_content="No active session found.",
+                is_error=True,
+            )
+        if not secrets:
+            return ToolResult(
+                llm_content="No environment variable values were provided for ask_user_env.",
+                user_display_content="No environment variable values were provided.",
                 is_error=True,
             )
 
@@ -114,14 +130,38 @@ class AskUserEnvTool(BaseAgentTool):
                     is_error=True,
                 )
 
+            session_uuid = _uuid.UUID(str(session_id))
+            user_uuid = _uuid.UUID(str(user_id))
+            secret_orchestrator = ProjectSecretOrchestrator(
+                secret_service=SecretService(
+                    project_repo=ProjectRepository(),
+                    config=container.config,
+                ),
+                database_service=DatabaseService(
+                    project_repo=ProjectRepository(),
+                    config=container.config,
+                ),
+                env_sync_service=SandboxEnvSyncService(
+                    sandbox_service=container.sandbox_service,
+                ),
+            )
+
             async with get_db_session_local() as db:
                 project = await container.project_service.get_session_project_or_none(
                     db,
-                    session_id=_uuid.UUID(str(session_id)),
-                    user_id=_uuid.UUID(str(user_id)),
+                    session_id=session_uuid,
+                    user_id=user_uuid,
                 )
                 if not project:
                     raise ProjectNotFoundError(session_id=str(session_id))
+                result = await secret_orchestrator.add_secrets(
+                    db,
+                    session_id=session_uuid,
+                    user_id=user_uuid,
+                    secrets=secrets,
+                    project_path=project_dir or project.project_path,
+                    sync_policy="ensure",
+                )
         except ProjectNotFoundError:
             return ToolResult(
                 llm_content=(
@@ -141,18 +181,27 @@ class AskUserEnvTool(BaseAgentTool):
                 is_error=True,
             )
 
-        project_path = project_dir or project.project_path
-        key_list_display = ", ".join(keys_list) if keys_list else "requested environment variables"
+        project_path = result.project_path_used
+        key_list_display = (
+            ", ".join(sorted(secrets)) if secrets else "requested environment variables"
+        )
+        restart_note = ""
+        if result.restart_required:
+            restart_note = (
+                " Existing terminals or development servers started before this change may "
+                "need to be restarted to pick up the new environment."
+            )
 
         return ToolResult(
             llm_content=(
                 f"Environment variables were saved for `{project_path}`. "
-                f"Saved keys: {key_list_display}."
+                f"Saved keys: {key_list_display}.{restart_note}"
             ),
             user_display_content={
                 "project_directory": project_path,
-                "keys": keys_list,
+                "keys": sorted(secrets),
                 "message": message,
+                "restart_required": result.restart_required,
             },
             is_error=False,
         )

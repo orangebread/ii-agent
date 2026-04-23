@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from ii_agent.core.exceptions import ValidationError
 import ii_agent.projects.secrets.service as secret_service_module
 from ii_agent.projects.secrets.service import SecretService
 
@@ -49,7 +50,7 @@ async def test_add_and_delete_secrets_apply_merge_semantics(settings_factory, mo
     monkeypatch.setattr(
         secret_service_module,
         "_decrypt_secrets_payload",
-        lambda payload: {"A": "1", "B": "2"},
+        lambda payload: {"A": "1", "B": "2", "BAD-NAME": "legacy"},
     )
 
     service = SecretService(project_repo=project_repo, config=settings_factory())
@@ -74,7 +75,7 @@ async def test_add_and_delete_secrets_apply_merge_semantics(settings_factory, mo
         db=None,
         session_id=session_id,
         user_id="user-1",
-        secret_keys=["B", "missing"],
+        secret_keys=["B", "missing", "BAD-NAME"],
     )
     delete_call = service.replace_session_project_secrets.await_args
     assert delete_call.kwargs["secrets"] == {"A": "1"}
@@ -117,3 +118,16 @@ async def test_add_and_delete_secrets_fallback_when_decrypt_is_not_dict(
     )
     delete_call = service.replace_session_project_secrets.await_args
     assert delete_call.kwargs["secrets"] == {}
+
+
+@pytest.mark.asyncio
+async def test_replace_session_project_secrets_rejects_invalid_env_var_names(settings_factory):
+    service = SecretService(project_repo=AsyncMock(), config=settings_factory())
+
+    with pytest.raises(ValidationError, match="Invalid environment variable"):
+        await service.replace_session_project_secrets(
+            db=None,
+            session_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            secrets={"BAD-NAME": "secret-123"},
+        )

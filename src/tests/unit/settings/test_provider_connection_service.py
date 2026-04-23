@@ -68,6 +68,45 @@ async def test_upsert_connection_encrypts_and_lists():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored_provider", "stored_product", "lookup_provider", "lookup_product"),
+    [
+        ("openai", "codex", "OpenAI", "CODEX"),
+        ("anthropic", "claude_code", "Anthropic", "CLAUDE_CODE"),
+    ],
+)
+async def test_get_by_provider_product_normalizes_lookup_keys(
+    stored_provider: str,
+    stored_product: str,
+    lookup_provider: str,
+    lookup_product: str,
+):
+    repo = FakeProviderConnectionRepo()
+    service = ProviderConnectionService(repo=repo)
+    user_id = uuid.uuid4()
+
+    created = await service.upsert_connection(
+        db=None,
+        user_id=user_id,
+        provider=stored_provider,
+        product=stored_product,
+        credentials={"token": "present"},
+        auth_mode="oauth",
+        display_name="Connected Provider",
+    )
+
+    looked_up = await service.get_by_provider_product(
+        db=None,
+        user_id=user_id,
+        provider=lookup_provider,
+        product=lookup_product,
+    )
+
+    assert looked_up is not None
+    assert looked_up.id == created.id
+
+
+@pytest.mark.asyncio
 async def test_upsert_connection_updates_existing_row():
     repo = FakeProviderConnectionRepo()
     service = ProviderConnectionService(repo=repo)

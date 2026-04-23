@@ -19,7 +19,7 @@ from ii_agent.settings.llm.types import ApiType
 from ii_agent.chat.llm.custom import CustomProvider
 from ii_agent.chat.base import LLMClient
 from ii_agent.chat.llm.anthropic import AnthropicProvider
-from ii_agent.chat.llm.openai import OpenAIProvider
+from ii_agent.chat.llm.openai import CodexProvider, OpenAIProvider
 from ii_agent.chat.llm.gemini import GeminiProvider
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,9 @@ class LLMProviderFactory:
         provider = llm_config.provider
         api_type = llm_config.api_type
 
+        if provider == Provider.OPENAI and getattr(llm_config, "runtime_product", None) == "codex":
+            return CodexProvider
+
         # Check (provider, api_type) override first
         if api_type is not None:
             provider_class = cls._api_type_registry.get((provider, api_type))
@@ -69,7 +72,11 @@ class LLMProviderFactory:
         provider_class = cls._provider_registry.get(provider)
         if provider_class:
             # OpenAI + custom base_url → CustomProvider (backward compat)
-            if provider == Provider.OPENAI and llm_config.base_url is not None:
+            if (
+                provider == Provider.OPENAI
+                and llm_config.base_url is not None
+                and getattr(llm_config, "runtime_product", None) != "codex"
+            ):
                 return CustomProvider
             return provider_class
 

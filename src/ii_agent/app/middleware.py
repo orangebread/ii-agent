@@ -30,8 +30,6 @@ def _build_allowed_origins(settings: Settings) -> list[str]:
 
 def configure_middleware(app: FastAPI, settings: Settings) -> None:
     """Register middleware in the same order as the legacy bootstrap."""
-    setup_cors(app, allowed_origins=_build_allowed_origins(settings))
-
     app.add_middleware(
         SessionMiddleware,
         secret_key=settings.oauth.session_secret_key,
@@ -44,3 +42,6 @@ def configure_middleware(app: FastAPI, settings: Settings) -> None:
 
     app.exception_handler(IIAgentError)(ii_agent_error_handler)
     app.add_middleware(GZipMiddleware)
+
+    # Register CORS last so it wraps exception-generated responses too.
+    setup_cors(app, allowed_origins=_build_allowed_origins(settings))

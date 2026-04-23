@@ -4,7 +4,11 @@ from ii_agent.settings.llm import Provider
 from ii_agent.settings.llm.types import ApiType
 
 
-def _build_anthropic_direct(api_key: str | None, llm_config: LLMConfig) -> Model:
+def _build_anthropic_direct(
+    api_key: str | None,
+    auth_token: str | None,
+    llm_config: LLMConfig,
+) -> Model:
     """Build an Anthropic Claude model using the direct API."""
     from ii_agent.agents.models.anthropic.claude import Claude
 
@@ -15,6 +19,7 @@ def _build_anthropic_direct(api_key: str | None, llm_config: LLMConfig) -> Model
     return Claude(
         id=llm_config.model,
         api_key=api_key,
+        auth_token=auth_token,
         temperature=llm_config.temperature,
         thinking={"type": "enabled", "budget_tokens": 16_000},
         max_tokens=32_000,
@@ -87,9 +92,25 @@ def _build_openai(api_key: str | None, llm_config: LLMConfig) -> Model:
         parallel_tool_calls=True,
         max_retries=llm_config.max_retries,
         base_url=llm_config.base_url,
+        default_headers=llm_config.default_headers,
         max_output_tokens=64_000,
         timeout=600.0,
         truncation="auto",
+        reasoning={"effort": "medium", "summary": "auto"},
+    )
+
+
+def _build_codex(api_key: str | None, llm_config: LLMConfig) -> Model:
+    """Build a ChatGPT-backed Codex model using a conservative Responses contract."""
+    from ii_agent.agents.models.openai import CodexResponses
+
+    return CodexResponses(
+        api_key=api_key,
+        id=llm_config.model,
+        max_retries=llm_config.max_retries,
+        base_url=llm_config.base_url,
+        default_headers=llm_config.default_headers,
+        timeout=600.0,
         reasoning={"effort": "medium", "summary": "auto"},
     )
 
@@ -115,7 +136,7 @@ _MODEL_BUILDERS: dict[
     tuple[Provider, ApiType | None],
     callable,
 ] = {
-    (Provider.ANTHROPIC, None): lambda ak, cfg: _build_anthropic_direct(ak, cfg),
+    (Provider.ANTHROPIC, None): lambda ak, at, cfg: _build_anthropic_direct(ak, at, cfg),
     (Provider.ANTHROPIC, ApiType.VERTEX_AI): lambda ak, cfg: _build_anthropic_vertex(ak, cfg),
     (Provider.GOOGLE, None): lambda ak, cfg: _build_google(ak, cfg, vertexai=False),
     (Provider.GOOGLE, ApiType.VERTEX_AI): lambda ak, cfg: _build_google(ak, cfg, vertexai=True),
@@ -133,7 +154,14 @@ def get_model(model_provider: Provider, llm_config: LLMConfig, **kwargs) -> Mode
     maker (Anthropic, Google, OpenAI, etc.).
     """
     api_key = llm_config.api_key.get_secret_value() if llm_config.api_key else None
+    auth_token = llm_config.auth_token.get_secret_value() if llm_config.auth_token else None
     api_type = llm_config.api_type
+
+    if (
+        model_provider == Provider.OPENAI
+        and getattr(llm_config, "runtime_product", None) == "codex"
+    ):
+        return _build_codex(api_key, llm_config)
 
     builder = _MODEL_BUILDERS.get((model_provider, api_type))
     if builder is None:
@@ -142,4 +170,6 @@ def get_model(model_provider: Provider, llm_config: LLMConfig, **kwargs) -> Mode
     if builder is None:
         return _build_custom(api_key, llm_config)
 
+    if model_provider == Provider.ANTHROPIC and api_type is None:
+        return builder(api_key, auth_token, llm_config)
     return builder(api_key, llm_config)

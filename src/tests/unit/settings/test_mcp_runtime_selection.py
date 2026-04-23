@@ -229,3 +229,29 @@ async def test_resolve_effective_runtime_keeps_expired_claude_with_refresh_token
     )
 
     assert selected.id == claude.id
+
+
+@pytest.mark.asyncio
+async def test_resolve_runtime_setting_for_run_prefers_matching_provider_connection():
+    codex = _setting("codex")
+    claude = _setting("claude_code")
+    repo = FakeMCPRepo([codex, claude])
+    service = MCPSettingService(
+        repo=repo,
+        config=SimpleNamespace(),
+        user_repo=FakeUserRepo(default_mcp_setting_id=claude.id),
+        session_repo=FakeSessionRepo(mcp_setting_id=None),
+        provider_connection_service=FakeProviderConnectionService(
+            {codex.provider_connection_id, claude.provider_connection_id}
+        ),
+    )
+
+    selected = await service.resolve_runtime_setting_for_run(
+        db=None,
+        user_id="user-1",
+        session_id=uuid.uuid4(),
+        provider_connection_id=codex.provider_connection_id,
+        requested_tool_type="claude_code",
+    )
+
+    assert selected.id == codex.id

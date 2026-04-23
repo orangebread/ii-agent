@@ -5,6 +5,7 @@ Extracted from ``server.socket.command.continue_run_handler``.
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
 
 from ii_agent.agents.factory.agent import agent_factory
@@ -54,6 +55,21 @@ class ContinueRunHandler(BaseCommandHandler[ContinueRunContent]):
         if tool.tool_args is None:
             tool.tool_args = {}
         tool.tool_args.update(user_input)
+
+    @staticmethod
+    def _extract_run_context(
+        run_task_data: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """Recover the original query-time agent config from RunTask metadata."""
+        if not isinstance(run_task_data, dict):
+            return None, None
+
+        tool_args = run_task_data.get("tool_args")
+        metadata = run_task_data.get("metadata")
+
+        normalized_tool_args = tool_args if isinstance(tool_args, dict) else None
+        normalized_metadata = metadata if isinstance(metadata, dict) else None
+        return normalized_tool_args, normalized_metadata
 
     async def handle(self, content: ContinueRunContent, session_info: SessionInfo) -> None:
         """Handle the continue_run command."""
@@ -121,11 +137,20 @@ class ContinueRunHandler(BaseCommandHandler[ContinueRunContent]):
             if not session_info.model_setting_id:
                 raise ValueError("Session has no model_setting_id for continue_run")
             async with get_db_session_local() as db:
+                run_task = await self._container.run_task_service.get_task_by_id(
+                    db,
+                    task_id=UUID(run_id),
+                )
                 llm_config = (
                     await self._container.model_setting_service.resolve_config_by_setting_id(
-                        db, setting_id=session_info.model_setting_id
+                        db,
+                        setting_id=session_info.model_setting_id,
+                        user_id=session_info.user_id,
                     )
                 )
+            tool_args, metadata = self._extract_run_context(
+                getattr(run_task, "data", None) if run_task is not None else None
+            )
 
             # Create agent with same configuration (matches query handler pattern)
             agent = await agent_factory.create_agent(
@@ -136,6 +161,8 @@ class ContinueRunHandler(BaseCommandHandler[ContinueRunContent]):
                 if session_info.agent_type
                 else AgentType.GENERAL,
                 session_store=session_store,
+                tool_args=tool_args,
+                metadata=metadata,
                 skill_creator=self._create_skill_creator(session_info.user_id),
             )
 

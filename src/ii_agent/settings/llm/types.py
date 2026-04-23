@@ -43,3 +43,20 @@ class ConfigType(StrEnum):
 
     USER = "user"
     SYSTEM = "system"
+
+
+class CredentialSource(StrEnum):
+    """How a resolved model authenticates execution."""
+
+    SYSTEM = "system"
+    API_KEY = "api_key"
+    PROVIDER_OAUTH = "provider_oauth"
+
+
+class ModelAvailabilityStatus(StrEnum):
+    """Whether a model can be selected for execution right now."""
+
+    AVAILABLE = "available"
+    REAUTH_REQUIRED = "reauth_required"
+    MISSING_CREDENTIALS = "missing_credentials"
+    UNSUPPORTED = "unsupported"

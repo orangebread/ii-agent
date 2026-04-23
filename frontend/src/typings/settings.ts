@@ -19,6 +19,18 @@ export type ProviderType = 'OpenAI' | 'Anthropic' | 'Google' | 'Cerebras' | 'Cus
 /** Must match BE ApiType StrEnum in settings/llm/types.py */
 export type ApiType = 'vertex_ai' | 'azure' | 'bedrock'
 
+/** Must match BE CredentialSource StrEnum in settings/llm/types.py */
+export type CredentialSource = 'system' | 'api_key' | 'provider_oauth'
+
+/** Must match BE ModelAvailabilityStatus StrEnum in settings/llm/types.py */
+export type ModelAvailabilityStatus =
+    | 'available'
+    | 'reauth_required'
+    | 'missing_credentials'
+    | 'unsupported'
+
+export type RuntimeProduct = 'codex' | 'claude_code'
+
 /** Provider-specific params stored in the `configs` JSONB column. */
 export interface ModelParams {
     api_type?: ApiType | null
@@ -49,6 +61,13 @@ export interface IModel {
     supports_vision?: boolean
     description?: string
     source?: 'user' | 'system'
+    credential_source?: CredentialSource
+    provider_connection_id?: string | null
+    runtime_product?: RuntimeProduct | null
+    is_managed?: boolean
+    is_selectable?: boolean
+    availability_status?: ModelAvailabilityStatus
+    disabled_reason?: string | null
     pricing?: {
         input_price_per_million?: number
         output_price_per_million?: number

@@ -15,6 +15,7 @@ from ii_agent.tasks.service import RunTaskService
 from ii_agent.credits.constants import MINIMUM_REQUIRED_CREDITS
 from ii_agent.realtime.events.models import ApplicationEvent
 from ii_agent.realtime.events.repository import EventRepository
+from ii_agent.settings.llm.exceptions import LLMSettingUnavailableError
 from ii_agent.sessions.exceptions import SessionNotFoundError
 from ii_agent.sessions.models import Session
 from ii_agent.sessions.repository import SessionRepository
@@ -29,6 +30,7 @@ if TYPE_CHECKING:
     from ii_agent.credits.service import CreditService
     from ii_agent.files.service import FileService
     from ii_agent.settings.llm.service import ModelSettingService
+    from ii_agent.settings.mcp.service import MCPSettingService
 
 logger = logging.getLogger(__name__)
 
@@ -425,6 +427,7 @@ class SessionService:
         agent_type: str | None,
         credit_service: CreditService,
         model_setting_service: ModelSettingService,
+        mcp_setting_service: MCPSettingService | None = None,
     ) -> ValidatedSessionResult:
         """Validate a session for an agent run, backfill defaults, and check credits.
 
@@ -443,23 +446,60 @@ class SessionService:
 
         session_info = self._build_session_info(session)
 
-        model_config = await model_setting_service.resolve_model_config(
-            db,
-            session=session_info,
-            source=source,
-            model_id=model_id,
+        try:
+            model_config = await model_setting_service.resolve_model_config(
+                db,
+                session=session_info,
+                source=source,
+                model_id=model_id,
+            )
+        except LLMSettingUnavailableError:
+            return ValidatedSessionResult(
+                is_valid=False,
+                session_info=session_info,
+                error_code="missing_credentials",
+            )
+        except ValueError:
+            return ValidatedSessionResult(
+                is_valid=False,
+                session_info=session_info,
+                error_code="session_error",
+            )
+
+        requested_runtime_tool_type = _runtime_tool_type_for_agent(agent_type)
+        runtime_selection_required = bool(
+            requested_runtime_tool_type or getattr(model_config, "runtime_product", None)
         )
+        runtime_setting = None
+        if mcp_setting_service is not None and runtime_selection_required:
+            runtime_setting = await mcp_setting_service.resolve_runtime_setting_for_run(
+                db,
+                user_id=user_id,
+                session_id=session_id,
+                provider_connection_id=getattr(model_config, "provider_connection_id", None),
+                requested_tool_type=requested_runtime_tool_type,
+            )
+            if runtime_setting is None:
+                return ValidatedSessionResult(
+                    is_valid=False,
+                    session_info=session_info,
+                    llm_config=model_config,
+                    error_code="missing_credentials",
+                )
 
         # Backfill missing fields directly on the ORM object
         dirty = False
         if not session.name and text:
             session.name = text.strip()[:100]
             dirty = True
-        if session.agent_type is None and agent_type is not None:
+        if agent_type is not None and session.agent_type != agent_type:
             session.agent_type = agent_type
             dirty = True
-        if not session.model_setting_id:
+        if session.model_setting_id != model_config.id:
             session.model_setting_id = model_config.id
+            dirty = True
+        if runtime_setting is not None and session.mcp_setting_id != runtime_setting.id:
+            session.mcp_setting_id = runtime_setting.id
             dirty = True
 
         if dirty:
@@ -525,3 +565,10 @@ class SessionService:
             mcp_setting_id=session.mcp_setting_id,
             session_metadata=session.session_metadata,
         )
+
+
+def _runtime_tool_type_for_agent(agent_type: str | None) -> str | None:
+    """Return the runtime tool type implied by the selected agent type."""
+    if agent_type in {"codex", "claude_code"}:
+        return agent_type
+    return None

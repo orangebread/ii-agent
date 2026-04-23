@@ -8,10 +8,16 @@ from typing import Any, Dict, TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ii_agent.core.config.settings import Settings
+from ii_agent.core.logger import logger
 
 from ii_agent.projects.exceptions import ProjectNotFoundError
 from ii_agent.projects.repository import ProjectRepository
-from ii_agent.projects.secrets.utils import _decrypt_secrets_payload, _encrypt_secrets_payload
+from ii_agent.projects.secrets.utils import (
+    _decrypt_secrets_payload,
+    _encrypt_secrets_payload,
+    sanitize_secret_payload,
+    validate_env_var_names,
+)
 
 if TYPE_CHECKING:
     from ii_agent.projects.models import Project
@@ -21,7 +27,7 @@ class SecretService:
     """Service for saving secrets to DB.
 
     Sandbox env file syncing is handled separately by
-    ``sandboxes.env_sync_service.SandboxEnvSyncService``.
+    ``projects.secrets.env_sync_service.SandboxEnvSyncService``.
     """
 
     def __init__(
@@ -41,6 +47,7 @@ class SecretService:
         secrets: Dict[str, Any],
     ) -> "Project":
         """Replace the session project secrets."""
+        validate_env_var_names(secrets)
         project = await self._project_repo.get_by_session_and_user(
             db, session_id=session_id, user_id=user_id
         )
@@ -82,9 +89,9 @@ class SecretService:
             user_id=user_id,
         )
 
-        existing_secrets = _decrypt_secrets_payload(project.secrets_json) or {}
-        if not isinstance(existing_secrets, dict):
-            existing_secrets = {}
+        existing_secrets = self._sanitize_existing_secrets(
+            _decrypt_secrets_payload(project.secrets_json)
+        )
 
         merged = {**existing_secrets, **secrets}
 
@@ -116,9 +123,9 @@ class SecretService:
             user_id=user_id,
         )
 
-        existing_secrets = _decrypt_secrets_payload(project.secrets_json) or {}
-        if not isinstance(existing_secrets, dict):
-            existing_secrets = {}
+        existing_secrets = self._sanitize_existing_secrets(
+            _decrypt_secrets_payload(project.secrets_json)
+        )
 
         for key in secret_keys:
             existing_secrets.pop(key, None)
@@ -129,3 +136,15 @@ class SecretService:
             user_id=user_id,
             secrets=existing_secrets,
         )
+
+    @staticmethod
+    def _sanitize_existing_secrets(payload: Any) -> dict[str, Any]:
+        sanitized, invalid_keys = sanitize_secret_payload(payload)
+
+        if invalid_keys:
+            logger.warning(
+                "Dropping invalid persisted secret key(s) during mutation: %s",
+                ", ".join(sorted(invalid_keys)),
+            )
+
+        return sanitized

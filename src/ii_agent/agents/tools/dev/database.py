@@ -4,6 +4,8 @@ from ii_agent.core.container import get_app_container
 from ii_agent.core.db import get_db_session_local
 from ii_agent.projects.databases.models import ProjectDatabase, DatabaseSource
 from ii_agent.projects.databases.repository import ProjectDatabaseRepository
+from ii_agent.projects.repository import ProjectRepository
+from ii_agent.projects.secrets.service import SecretService
 from ii_agent.agents.tools.clients import tool_client
 from ii_agent.agents.tools.base import BaseAgentTool, ToolResult
 from ii_agent.core.logger import logger
@@ -183,27 +185,16 @@ class GetDatabaseConnection(BaseAgentTool):
             user_uuid = _uuid.UUID(user_id)
 
             async with get_db_session_local() as db:
-                # Get existing project to retrieve current secrets
-                project = await container.project_service.get_session_project_or_none(
+                secret_service = SecretService(
+                    project_repo=ProjectRepository(),
+                    config=container.config,
+                )
+                await secret_service.add_secrets(
                     db,
                     session_id=session_uuid,
                     user_id=user_uuid,
+                    secrets={"DATABASE_URL": database_url},
                 )
-                if not project:
-                    return
-
-                # Get existing secrets or empty dict
-                existing_secrets = project.secrets_json or {}
-                if not isinstance(existing_secrets, dict):
-                    existing_secrets = {}
-
-                # Add/overwrite DATABASE_URL
-                existing_secrets["DATABASE_URL"] = database_url
-
-                # Save updated secrets
-                project.secrets_json = existing_secrets
-                await db.flush()
-                await db.commit()
 
             logger.info(f"Saved DATABASE_URL to project secrets for session {session_id}")
         except Exception as exc:

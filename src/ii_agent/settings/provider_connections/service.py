@@ -30,6 +30,17 @@ class ProviderConnectionAuthState:
     needs_reauth: bool
 
 
+@dataclass(frozen=True)
+class ProviderConnectionModelCredentials:
+    """Resolved provider-backed credentials for direct model execution."""
+
+    api_key: str | None = None
+    auth_token: str | None = None
+    base_url: str | None = None
+    default_headers: dict[str, str] | None = None
+    runtime_product: str | None = None
+
+
 class ProviderConnectionService:
     """Manage encrypted provider credentials separately from MCP runtime config."""
 
@@ -75,8 +86,8 @@ class ProviderConnectionService:
         return await self._repo.get_by_provider_product(
             db,
             user_id=user_id,
-            provider=provider,
-            product=product,
+            provider=_normalize_storage_key(provider),
+            product=_normalize_storage_key(product),
         )
 
     async def delete_connection(
@@ -114,15 +125,19 @@ class ProviderConnectionService:
         existing = await self._repo.get_by_provider_product(
             db,
             user_id=user_id,
-            provider=provider,
-            product=product,
+            provider=_normalize_storage_key(provider),
+            product=_normalize_storage_key(product),
         )
+        provider_key = _normalize_storage_key(provider)
+        product_key = _normalize_storage_key(product)
         payload = encrypted_credentials_json or encryption_manager.encrypt(
             json.dumps(credentials or {})
         )
         now = datetime.now(timezone.utc)
 
         if existing:
+            existing.provider = provider_key
+            existing.product = product_key
             existing.auth_mode = auth_mode
             existing.encrypted_credentials_json = payload
             existing.external_account_id = external_account_id
@@ -139,8 +154,8 @@ class ProviderConnectionService:
         row = ProviderConnection(
             id=uuid.uuid4(),
             user_id=user_id,
-            provider=provider,
-            product=product,
+            provider=provider_key,
+            product=product_key,
             auth_mode=auth_mode,
             encrypted_credentials_json=payload,
             external_account_id=external_account_id,
@@ -172,6 +187,23 @@ class ProviderConnectionService:
         now: datetime | None = None,
     ) -> bool:
         return self.describe_auth_state(connection, now=now).is_usable
+
+    def supports_provider_managed_model_catalog(self, connection: ProviderConnection) -> bool:
+        """Return whether a provider connection can materialize managed model rows."""
+        credentials = self.get_credentials_dict(connection)
+        provider = _normalize_storage_key(getattr(connection, "provider", None))
+        product = _normalize_storage_key(getattr(connection, "product", None))
+
+        if provider == "anthropic" and product == "claude_code":
+            return isinstance(credentials.get("claudeAiOauth"), dict)
+
+        if provider == "openai" and product == "codex":
+            tokens = credentials.get("tokens")
+            return isinstance(tokens, dict) and bool(
+                tokens.get("access_token") or tokens.get("refresh_token")
+            )
+
+        return False
 
     def describe_auth_state(
         self,
@@ -227,6 +259,95 @@ class ProviderConnectionService:
             needs_reauth=False,
         )
 
+    def get_live_model_auth_token(
+        self,
+        connection: ProviderConnection,
+        *,
+        now: datetime | None = None,
+    ) -> str | None:
+        """Return an unexpired provider-backed auth token for direct model execution."""
+        current_time = now or datetime.now(timezone.utc)
+        credentials = self.get_credentials_dict(connection)
+        provider = _normalize_storage_key(getattr(connection, "provider", None))
+        product = _normalize_storage_key(getattr(connection, "product", None))
+
+        if provider != "anthropic" or product != "claude_code":
+            return None
+        if getattr(connection, "status", None) != ProviderConnectionStatus.CONNECTED.value:
+            return None
+
+        oauth = credentials.get("claudeAiOauth")
+        if not isinstance(oauth, dict):
+            return None
+
+        auth_token = oauth.get("accessToken")
+        if not auth_token:
+            return None
+
+        expires_at = getattr(connection, "expires_at", None)
+        if expires_at is None:
+            expires_ms = oauth.get("expiresAt")
+            if isinstance(expires_ms, int):
+                expires_at = datetime.fromtimestamp(expires_ms / 1000, tz=timezone.utc)
+
+        if expires_at is not None:
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if expires_at <= current_time:
+                return None
+
+        return str(auth_token)
+
+    def get_live_model_credentials(
+        self,
+        connection: ProviderConnection,
+        *,
+        now: datetime | None = None,
+    ) -> ProviderConnectionModelCredentials | None:
+        """Return direct model execution credentials for supported provider connections."""
+        current_time = now or datetime.now(timezone.utc)
+        credentials = self.get_credentials_dict(connection)
+        provider = _normalize_storage_key(getattr(connection, "provider", None))
+        product = _normalize_storage_key(getattr(connection, "product", None))
+
+        if provider == "anthropic" and product == "claude_code":
+            auth_token = self.get_live_model_auth_token(connection, now=current_time)
+            if not auth_token:
+                return None
+            return ProviderConnectionModelCredentials(
+                auth_token=auth_token,
+                runtime_product="claude_code",
+            )
+
+        if (
+            provider == "openai"
+            and product == "codex"
+            and getattr(connection, "status", None) == ProviderConnectionStatus.CONNECTED.value
+        ):
+            tokens = credentials.get("tokens")
+            if not isinstance(tokens, dict):
+                return None
+
+            access_token = tokens.get("access_token")
+            if not access_token:
+                return None
+
+            account_id = (
+                tokens.get("account_id")
+                or getattr(connection, "external_account_id", None)
+                or ((getattr(connection, "connection_metadata", None) or {}).get("chatgpt_account_id"))
+            )
+            default_headers = {"ChatGPT-Account-ID": str(account_id)} if account_id else None
+
+            return ProviderConnectionModelCredentials(
+                api_key=str(access_token),
+                base_url="https://chatgpt.com/backend-api/codex",
+                default_headers=default_headers,
+                runtime_product="codex",
+            )
+
+        return None
+
 
 def _to_info(connection: ProviderConnection) -> ProviderConnectionInfo:
     return ProviderConnectionInfo(
@@ -254,12 +375,16 @@ def _has_refreshable_oauth_credentials(
     credentials: dict[str, Any],
 ) -> bool:
     """Return whether the stored credentials can self-refresh without reauth."""
-    if (
-        getattr(connection, "provider", None) == "anthropic"
-        and getattr(connection, "product", None) == "claude_code"
-    ):
+    provider = _normalize_storage_key(getattr(connection, "provider", None))
+    product = _normalize_storage_key(getattr(connection, "product", None))
+    if provider == "anthropic" and product == "claude_code":
         oauth = credentials.get("claudeAiOauth")
         return isinstance(oauth, dict) and bool(oauth.get("refreshToken"))
 
     tokens = credentials.get("tokens")
     return isinstance(tokens, dict) and bool(tokens.get("refresh_token"))
+
+
+def _normalize_storage_key(value: str | None) -> str:
+    """Normalize provider/product keys to the lowercase storage format."""
+    return str(value or "").strip().lower()

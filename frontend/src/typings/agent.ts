@@ -113,6 +113,8 @@ export enum ErrorCode {
     // Billing
     INSUFFICIENT_CREDITS = 'insufficient_credits',
     // Execution
+    PROVIDER_CONTRACT_ERROR = 'provider_contract_error',
+    PROVIDER_CONFIG_ERROR = 'provider_config_error',
     EXECUTION_ERROR = 'execution_error',
     UNEXPECTED_ERROR = 'unexpected_error',
     INTERNAL_ERROR = 'internal_error',
@@ -773,7 +775,6 @@ export enum CommandType {
     CONTINUE_RUN = 'continue_run',
     PUBLISH_PROJECT = 'publish',
     PUBLISH_CLOUD_RUN = 'publish_cloud_run',
-    SAVE_ENV = 'save_env',
     SUBMIT_TESTFLIGHT = 'submit_testflight',
     PING = 'ping',
     CANCEL = 'cancel',
@@ -885,15 +886,6 @@ interface StartForkPayload {
     metadata?: Record<string, unknown>
 }
 
-interface SaveEnvPayload {
-    command: CommandType.SAVE_ENV
-    tool_call_id: string
-    tool_name: string
-    secrets?: Array<Record<string, unknown>> | Record<string, string>
-    project_directory?: string
-    tool_args?: Record<string, unknown>
-}
-
 interface SubmitTestflightPayload {
     command: CommandType.SUBMIT_TESTFLIGHT
     expo_token?: string
@@ -987,7 +979,6 @@ export type CommandPayload =
     | PublishProjectPayload
     | CloudRunPublishPayload
     | StartForkPayload
-    | SaveEnvPayload
     | SubmitTestflightPayload
     | AppleAuthLoginPayload
     | AppleAuth2FAPayload

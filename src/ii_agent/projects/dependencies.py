@@ -7,7 +7,7 @@ container-managed.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import Depends
 
@@ -17,7 +17,9 @@ from ii_agent.projects.repository import ProjectRepository
 from ii_agent.projects.service import ProjectService
 from ii_agent.projects.deployment_orchestration_service import DeploymentOrchestrationService
 from ii_agent.projects.databases.service import DatabaseService
+from ii_agent.projects.secrets.orchestrator import ProjectSecretOrchestrator
 from ii_agent.projects.secrets.service import SecretService
+from ii_agent.projects.secrets.env_sync_service import SandboxEnvSyncService
 
 
 # ==================== Repository Dependencies ====================
@@ -76,26 +78,31 @@ def get_database_service(
 DatabaseServiceDep = Annotated[DatabaseService, Depends(get_database_service)]
 
 
-# ── Sandbox env sync (placeholder until service is implemented) ──────────
+# ── Sandbox env sync ──────────────────────────────────────────────────────
 
 
-class _SandboxEnvSyncServiceStub:
-    """Placeholder for the sandbox environment sync service.
-
-    The real ``SandboxEnvSyncService`` has not been implemented yet.
-    This stub satisfies the DI graph so the secrets router can load.
-    """
-
-    async def sync_env_files(self, db: Any, **kwargs: Any) -> None:  # noqa: ANN401, ARG002
-        """No-op until real implementation exists."""
+def _get_sandbox_env_sync_service(container: ContainerDep) -> SandboxEnvSyncService:
+    return SandboxEnvSyncService(sandbox_service=container.sandbox_service)
 
 
-def _get_sandbox_env_sync_service() -> _SandboxEnvSyncServiceStub:
-    return _SandboxEnvSyncServiceStub()
+SandboxEnvSyncServiceDep = Annotated[SandboxEnvSyncService, Depends(_get_sandbox_env_sync_service)]
 
 
-SandboxEnvSyncServiceDep = Annotated[
-    _SandboxEnvSyncServiceStub, Depends(_get_sandbox_env_sync_service)
+def get_project_secret_orchestrator(
+    secret_service: SecretServiceDep,
+    database_service: DatabaseServiceDep,
+    sandbox_env_sync: SandboxEnvSyncServiceDep,
+) -> ProjectSecretOrchestrator:
+    """Provide the canonical project-secret orchestration service."""
+    return ProjectSecretOrchestrator(
+        secret_service=secret_service,
+        database_service=database_service,
+        env_sync_service=sandbox_env_sync,
+    )
+
+
+ProjectSecretOrchestratorDep = Annotated[
+    ProjectSecretOrchestrator, Depends(get_project_secret_orchestrator)
 ]
 
 
@@ -110,4 +117,5 @@ __all__ = [
     "SecretServiceDep",
     "DatabaseServiceDep",
     "SandboxEnvSyncServiceDep",
+    "ProjectSecretOrchestratorDep",
 ]

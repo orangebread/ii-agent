@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ii_agent.core.db import get_db_session_local
+from ii_agent.settings.llm.exceptions import LLMSettingUnavailableError
 from ii_agent.settings.llm.schemas import ModelConfig
 from ii_agent.chat.types import (
     BinaryContent,
@@ -186,6 +187,11 @@ class ChatService:
         model_info = self._find_model_info(all_models, model_id)
         if not model_info:
             raise ModelNotFoundError(f"Model not found: {model_id}")
+        if not getattr(model_info, "is_selectable", True):
+            raise LLMSettingUnavailableError(
+                getattr(model_info, "disabled_reason", None)
+                or "This model is not ready for execution."
+            )
 
     async def get_model_config(
         self, db: AsyncSession, *, model_id: str, user_id: uuid.UUID
@@ -201,12 +207,19 @@ class ChatService:
                 return await self._model_setting_service.resolve_config_by_setting_id(
                     db,
                     setting_id=model_info.id,
+                    user_id=user_id,
                 )
             except ValueError:
                 logger.warning(
                     "Failed to resolve model config by setting id %s; falling back to model_id",
                     model_info.id,
                 )
+
+        if model_info is not None and not getattr(model_info, "is_selectable", True):
+            raise LLMSettingUnavailableError(
+                getattr(model_info, "disabled_reason", None)
+                or "This model is not ready for execution."
+            )
 
         return await self._model_setting_service.resolve_system_config(db, model_id=model_id)
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -200,6 +201,7 @@ def _mock_container(**overrides) -> MagicMock:
     container.deployments_service.update_deployment_metadata = AsyncMock()
     container.run_task_service = MagicMock()
     container.run_task_service.get_running_task = AsyncMock(return_value=None)
+    container.run_task_service.get_task_by_id = AsyncMock(return_value=None)
     container.run_task_service.create_task = AsyncMock()
     container.run_task_service.update_task_status = AsyncMock()
     container.event_service = MagicMock()
@@ -2106,6 +2108,7 @@ class TestContinueRunHandlerHandle:
         container.model_setting_service.resolve_config_by_setting_id = AsyncMock(
             return_value=llm_config
         )
+        container.run_task_service.get_task_by_id = AsyncMock(return_value=None)
 
         handler = ContinueRunHandler(pubsub=stream, container=container)
         handler.process_agent_event_stream = AsyncMock()
@@ -2179,3 +2182,68 @@ class TestContinueRunHandlerHandle:
             stream_events=True,
         )
         handler.process_agent_event_stream.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_reuses_original_query_tool_args_when_recreating_agent(self):
+        from ii_agent.realtime.handlers.continue_run import ContinueRunHandler
+
+        stream = CapturingEventStream()
+        container = _mock_container()
+        llm_config = MagicMock()
+        llm_config.is_user_model.return_value = False
+        container.model_setting_service.resolve_config_by_setting_id = AsyncMock(
+            return_value=llm_config
+        )
+        container.run_task_service.get_task_by_id = AsyncMock(
+            return_value=SimpleNamespace(
+                data={
+                    "tool_args": {"browser": True, "deep_research": False},
+                    "metadata": {"entry": "query"},
+                }
+            )
+        )
+
+        handler = ContinueRunHandler(pubsub=stream, container=container)
+        handler.process_agent_event_stream = AsyncMock()
+        handler._create_skill_creator = MagicMock(return_value=None)
+
+        session_info = _make_session_info()
+        session_info.model_setting_id = uuid.uuid4()
+        run_id = str(uuid.uuid4())
+
+        run_response = MagicMock(
+            run_id=run_id,
+            tools=[],
+            tools_requiring_confirmation=[],
+            tools_requiring_user_input=[],
+        )
+
+        mock_store = MagicMock()
+        mock_store.get_by_run_id = AsyncMock(return_value=run_response)
+
+        mock_agent = MagicMock()
+        mock_agent.acontinue_run = MagicMock(return_value=object())
+        create_agent_mock = AsyncMock(return_value=mock_agent)
+
+        with (
+            patch("ii_agent.realtime.handlers.continue_run.AgentSessionStore") as mock_store_cls,
+            patch("ii_agent.realtime.handlers.continue_run.get_db_session_local", new=_noop_db_cm),
+            patch(
+                "ii_agent.realtime.handlers.continue_run.agent_factory.create_agent",
+                new=create_agent_mock,
+            ),
+        ):
+            mock_store_cls.return_value = mock_store
+
+            await handler.dispatch(
+                {
+                    "run_id": run_id,
+                    "confirmed": True,
+                },
+                session_info,
+            )
+
+        create_agent_mock.assert_awaited_once()
+        kwargs = create_agent_mock.await_args.kwargs
+        assert kwargs["tool_args"] == {"browser": True, "deep_research": False}
+        assert kwargs["metadata"] == {"entry": "query"}

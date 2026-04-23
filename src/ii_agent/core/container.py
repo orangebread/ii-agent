@@ -96,6 +96,8 @@ from ii_agent.content.slides.templates.service import SlideTemplateService
 from ii_agent.content.slides.nano_banana.service import NanoBananaService
 from ii_agent.content.slides.design.service import SlideDesignService
 from ii_agent.projects.design.service import ProjectDesignService
+from ii_agent.projects.databases.service import DatabaseService
+from ii_agent.projects.secrets.runtime_state import ProjectSecretRuntimeStateService
 from ii_agent.chat.messages.service import MessageService
 from ii_agent.credits.service import CreditService
 from ii_agent.agents.sandboxes.live_terminal_service import LiveTerminalService
@@ -252,6 +254,11 @@ class ApplicationContainer:
             transaction_repo=credit_tx_repo,
             config=cfg,
         )
+        database_svc = DatabaseService(project_repo=project_repo, config=cfg)
+        secret_runtime_state_svc = ProjectSecretRuntimeStateService(
+            project_repo=project_repo,
+            database_service=database_svc,
+        )
 
         # ── Services with cross-service deps ──────────────────────────────
         user_svc = UserService(
@@ -267,6 +274,7 @@ class ApplicationContainer:
             sandbox_repo=sandbox_repo,
             session_repo=session_repo,
             config=cfg,
+            secret_runtime_state_service=secret_runtime_state_svc,
         )
 
         file_svc = FileService(
@@ -330,6 +338,7 @@ class ApplicationContainer:
         model_setting_svc = ModelSettingService(
             repo=model_setting_repo,
             session_repo=session_repo,
+            provider_connection_service=provider_connection_svc,
         )
 
         composio_cache_svc = ComposioCacheService(cache=composio_cache)

@@ -1,4 +1,6 @@
 from typing import Literal
+from uuid import UUID
+
 from pydantic import BaseModel, Field, SecretStr, SerializationInfo, field_serializer
 from pydantic.json import pydantic_encoder
 
@@ -36,7 +38,9 @@ class LLMConfig(BaseModel):
     )
     tokenizer: str | None = Field(default=None)
     api_key: SecretStr | None = Field(default=None)
+    auth_token: SecretStr | None = Field(default=None)
     base_url: str | None = Field(default=None)
+    default_headers: dict[str, str] | None = Field(default=None)
     max_retries: int = Field(default=10)
     max_message_chars: int = Field(default=30_000)
     temperature: float = Field(default=0.0)
@@ -51,21 +55,24 @@ class LLMConfig(BaseModel):
     config_type: Literal["system", "user"] | None = Field(
         default="system", description="system or user"
     )
+    provider_connection_id: UUID | None = Field(default=None)
+    runtime_product: str | None = Field(default=None)
 
-    @field_serializer("api_key")
-    def api_key_serializer(self, api_key: SecretStr | None, info: SerializationInfo):
-        """Custom serializer for API keys.
+    @field_serializer("api_key", "auth_token")
+    def secret_serializer(self, secret_value: SecretStr | None, info: SerializationInfo):
+        """Custom serializer for API-facing secrets.
 
-        To serialize the API key instead of ********, set expose_secrets to True in the serialization context.
+        To serialize the secret instead of ********, set expose_secrets to True in the
+        serialization context.
         """
-        if api_key is None:
+        if secret_value is None:
             return None
 
         context = info.context
         if context and context.get("expose_secrets", False):
-            return api_key.get_secret_value()
+            return secret_value.get_secret_value()
 
-        return pydantic_encoder(api_key)
+        return pydantic_encoder(secret_value)
 
     def is_user_model(self) -> bool:
         """Check if the model is a user model."""

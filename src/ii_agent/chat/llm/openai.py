@@ -82,6 +82,11 @@ from ii_agent.chat.types import (
     ToolCall,
 )
 from ii_agent.settings.llm import Provider
+from ii_agent.settings.llm.openai_responses_contract import (
+    apply_responses_request_contract,
+    apply_responses_session_contract,
+    merge_responses_instructions,
+)
 from ii_agent.settings.llm.schemas import ModelConfig
 from ii_agent.core.db import get_db_session_local
 from ii_agent.core.storage.client import get_storage
@@ -103,6 +108,8 @@ class OpenAIResponseParams(BaseModel):
     stream: bool = Field(False, description="Enable streaming")
     max_output_tokens: Optional[int] = Field(None, description="Maximum tokens to generate")
     reasoning: Optional[dict[str, Any]] = Field(None, description="Reasoning config")
+    store: Optional[bool] = Field(None, description="Persist Responses API state")
+    include: Optional[List[str]] = Field(None, description="Additional response fields to include")
     previous_response_id: Optional[str] = Field(None, description="Previous response ID")
 
     class Config:
@@ -182,6 +189,7 @@ class OpenAIProvider(LLMClient):
                 api_key=api_key,
                 base_url=base_url,
                 max_retries=1,
+                default_headers=llm_config.default_headers,
             )
 
     async def get_or_create_container(self, session_id: uuid.UUID) -> ChatProviderContainer:
@@ -455,17 +463,9 @@ class OpenAIProvider(LLMClient):
         openai_messages = []
         for msg in messages:
             if msg.role == MessageRole.SYSTEM:
-                text_part = msg.content()
-                if text_part:
-                    openai_messages.append(
-                        {
-                            "type": "message",
-                            "role": "system",
-                            "content": [{"type": "input_text", "text": text_part.text}],
-                        }
-                    )
+                continue
 
-            elif msg.role == MessageRole.USER:
+            if msg.role == MessageRole.USER:
                 content = []
                 # Process all parts in message
                 for part in msg.parts:
@@ -579,7 +579,7 @@ class OpenAIProvider(LLMClient):
 
                         progress_info = {
                             "type": "storybook_progress",
-                            "storybook_id": output.storybook_id,
+                            "storybook_id": str(output.storybook_id),
                             "storybook_name": output.storybook_name,
                             "total_pages": output.total_pages,
                             "completed_pages": output.completed_pages,
@@ -595,7 +595,7 @@ class OpenAIProvider(LLMClient):
 
                         storybook_info = {
                             "type": "storybook",
-                            "storybook_id": output.storybook_id,
+                            "storybook_id": str(output.storybook_id),
                             "storybook_name": output.storybook_name,
                             "page_count": len(output.pages),
                             "pages": [
@@ -622,6 +622,38 @@ class OpenAIProvider(LLMClient):
                     )
 
         return openai_messages
+
+    @staticmethod
+    def _extract_system_instructions(messages: List[Message]) -> str | None:
+        """Collect system messages into the Responses API instructions field."""
+        instruction_parts = []
+        for message in messages:
+            if message.role != MessageRole.SYSTEM:
+                continue
+
+            text_part = message.content()
+            if text_part and text_part.text:
+                instruction_parts.append(text_part.text)
+
+        return merge_responses_instructions(*instruction_parts)
+
+    @staticmethod
+    def _extract_previous_response_id(messages: List[Message]) -> str | None:
+        """Return the latest OpenAI response id from assistant provider metadata."""
+        for message in reversed(messages):
+            if message.role != MessageRole.ASSISTANT:
+                continue
+
+            provider_metadata = message.provider_metadata or {}
+            response_id = (
+                provider_metadata.get(Provider.OPENAI.value, {})
+                if isinstance(provider_metadata, dict)
+                else {}
+            ).get("response_id")
+            if isinstance(response_id, str) and response_id:
+                return response_id
+
+        return None
 
     async def _download_file_citations(
         self,
@@ -848,7 +880,6 @@ class OpenAIProvider(LLMClient):
             provider_options: Reserved for provider-specific request options
         """
         # Ensure container exists if code interpreter is enabled
-        container_id = None
         if is_code_interpreter_enabled:
             await self.get_or_create_container(session_id)
 
@@ -859,39 +890,66 @@ class OpenAIProvider(LLMClient):
             if latest_msg.file_ids:
                 file_ids_to_upload.extend(latest_msg.file_ids)
 
+        container_files = ContainerFile(container_id=None, files=[])
+        if session_id:
+            try:
+                resolved_session_id = (
+                    session_id if isinstance(session_id, uuid.UUID) else uuid.UUID(str(session_id))
+                )
+            except (TypeError, ValueError):
+                resolved_session_id = None
+
+            if resolved_session_id is not None:
+                container_files = await self._get_files_within_session(
+                    session_id=resolved_session_id,
+                    container_id=None,
+                )
+
         # Convert messages to input format
-        openai_messages = self._convert_messages(messages, None)
+        openai_messages = self._convert_messages(messages, container_files)
 
-        # Extract system message as instructions
-        instructions = template.substitute(current_date=datetime.now().strftime("%Y-%m-%d"))
         openai_opts = (provider_options or {}).get("openai", {})
-        user_messages = []
-
-        for msg in openai_messages:
-            if msg["role"] != "system":
-                user_messages.append(msg)
+        instructions = merge_responses_instructions(
+            template.substitute(current_date=datetime.now().strftime("%Y-%m-%d")),
+            self._extract_system_instructions(messages),
+            openai_opts.get("instructions"),
+        )
+        previous_response_id = self._extract_previous_response_id(messages)
+        session_contract = apply_responses_session_contract(
+            model_name=self.model_name,
+            base_url=self.llm_config.base_url,
+            store=openai_opts.get("store"),
+            include=openai_opts.get("include"),
+            previous_response_id=previous_response_id,
+        )
 
         # Convert tools to Responses API format (with container if code interpreter enabled)
-        openai_tools = None
-        if container_id:
-            openai_tools = self._convert_tools(
-                tools,
-                is_code_interpreter_enabled=is_code_interpreter_enabled,
-                container_id=container_id,
-            )
+        openai_tools = self._convert_tools(
+            tools,
+            container_files,
+            is_code_interpreter_enabled=is_code_interpreter_enabled,
+        )
 
         # Build params using Pydantic model
         params = OpenAIResponseParams(
             model=self.model_name,
-            input=user_messages if user_messages else [],
+            input=openai_messages if openai_messages else [],
             instructions=instructions,
             tools=openai_tools,
             stream=False,
             max_output_tokens=openai_opts.get("max_output_tokens"),
-            reasoning={"effort": "medium", "summary": "auto"},
+            reasoning=openai_opts.get("reasoning") or {"effort": "medium", "summary": "auto"},
+            store=session_contract.get("store"),
+            include=session_contract.get("include"),
+            previous_response_id=session_contract.get("previous_response_id"),
         )
 
-        response: Response = await self.client.responses.create(**params.to_dict())
+        params_dict = apply_responses_request_contract(
+            base_url=self.llm_config.base_url,
+            request_params=params.to_dict(),
+        )
+
+        response: Response = await self.client.responses.create(**params_dict)
 
         # Extract content and tool calls from response.output
         content: Optional[str] = None
@@ -993,20 +1051,20 @@ class OpenAIProvider(LLMClient):
         # Convert messages to input format
         openai_messages = self._convert_messages(messages, container_files)
 
-        previous_response_id = None
-        if messages:
-            # Scan backwards to find last assistant message
-            for message in reversed(messages):
-                if message.role == MessageRole.ASSISTANT:
-                    previous_response_id = (
-                        (message.provider_metadata or {})
-                        .get(Provider.OPENAI.value, {})
-                        .get("response_id")
-                    )
-                    break  # Stop after finding first (last) assistant message
-        # Extract system message as instructions
-        instructions = template.substitute(current_date=datetime.now().strftime("%Y-%m-%d"))
         openai_opts = (provider_options or {}).get("openai", {})
+        instructions = merge_responses_instructions(
+            template.substitute(current_date=datetime.now().strftime("%Y-%m-%d")),
+            self._extract_system_instructions(messages),
+            openai_opts.get("instructions"),
+        )
+        previous_response_id = self._extract_previous_response_id(messages)
+        session_contract = apply_responses_session_contract(
+            model_name=self.model_name,
+            base_url=self.llm_config.base_url,
+            store=openai_opts.get("store"),
+            include=openai_opts.get("include"),
+            previous_response_id=previous_response_id,
+        )
         # Convert tools to Responses API format (with container if code interpreter enabled)
         openai_tools = self._convert_tools(
             tools,
@@ -1022,11 +1080,16 @@ class OpenAIProvider(LLMClient):
             tools=openai_tools,
             stream=True,
             max_output_tokens=openai_opts.get("max_output_tokens"),
-            reasoning={"effort": "medium", "summary": "auto"},
-            previous_response_id=previous_response_id,
+            reasoning=openai_opts.get("reasoning") or {"effort": "medium", "summary": "auto"},
+            store=session_contract.get("store"),
+            include=session_contract.get("include"),
+            previous_response_id=session_contract.get("previous_response_id"),
         )
 
-        params_dict = params.to_dict()
+        params_dict = apply_responses_request_contract(
+            base_url=self.llm_config.base_url,
+            request_params=params.to_dict(),
+        )
 
         try:
             stream = await self.client.responses.create(**params_dict)
@@ -1338,3 +1401,7 @@ class OpenAIProvider(LLMClient):
                     logger.warning(f"Unknown output item type: {type(output_item)}")
 
         return content_parts, file_citations
+
+
+class CodexProvider(OpenAIProvider):
+    """Responses transport for ChatGPT-backed Codex runtimes."""

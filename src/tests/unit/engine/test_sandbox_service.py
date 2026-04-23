@@ -394,6 +394,201 @@ async def test_get_sandbox_by_session_accepts_db_first_and_normalizes_user_id(
 
 
 @pytest.mark.asyncio
+async def test_init_sandbox_merges_persisted_provider_data_on_reconnect(
+    settings_factory, monkeypatch
+):
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    sandbox_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=sandbox_id,
+        session_id=session_id,
+        provider=SandboxProviderType.E2B,
+        provider_sandbox_id="sbx-provider",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        provider_data={
+            "pty_sessions": {"build": {"pid": 123}},
+            "ii_agent_secret_sync": {
+                "revision": "persisted-revision",
+                "project_path": "/workspace/app",
+            },
+        },
+    )
+    sandbox_mgr = SimpleNamespace(
+        sandbox_id=str(sandbox_id),
+        session_id=str(session_id),
+        provider_sandbox_id="sbx-provider",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        metadata={
+            "ii_sandbox_id": str(sandbox_id),
+            "session_id": str(session_id),
+            "template_id": "template-1",
+        },
+    )
+    sandbox_repo = AsyncMock()
+    sandbox_repo.update_provider_info = AsyncMock()
+    service = SandboxService(
+        sandbox_repo=sandbox_repo,
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(),
+    )
+    monkeypatch.setattr(service, "_resolve_sandbox_record", AsyncMock(return_value=record))
+    monkeypatch.setattr(service, "_connect_provider", AsyncMock(return_value=sandbox_mgr))
+    monkeypatch.setattr(service, "_configure_mcp", AsyncMock())
+
+    result = await service.init_sandbox(
+        object(),
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    assert result is sandbox_mgr
+    persisted_provider_data = sandbox_repo.update_provider_info.await_args.kwargs["provider_data"]
+    assert persisted_provider_data["pty_sessions"] == {"build": {"pid": 123}}
+    assert persisted_provider_data["ii_agent_secret_sync"] == {
+        "revision": "persisted-revision",
+        "project_path": "/workspace/app",
+    }
+    assert persisted_provider_data["template_id"] == "template-1"
+
+
+@pytest.mark.asyncio
+async def test_init_sandbox_reconciles_runtime_secret_state(settings_factory, monkeypatch):
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    sandbox_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=sandbox_id,
+        session_id=session_id,
+        provider=SandboxProviderType.E2B,
+        provider_sandbox_id="sbx-provider",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        provider_data={},
+    )
+    sandbox = SimpleNamespace(
+        sandbox_id=str(sandbox_id),
+        session_id=str(session_id),
+        provider_sandbox_id="sbx-provider",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        metadata={"ii_sandbox_id": str(sandbox_id)},
+        files={},
+        created_directories=[],
+    )
+
+    async def _file_exists(file_path: str) -> bool:
+        return file_path in sandbox.files
+
+    async def _read_file(file_path: str) -> str:
+        return sandbox.files[file_path]
+
+    async def _write_file(file_path: str, content: str) -> SimpleNamespace:
+        sandbox.files[file_path] = content
+        return SimpleNamespace(path=file_path)
+
+    async def _create_directory(directory_path: str, exist_ok: bool = False) -> bool:
+        sandbox.created_directories.append((directory_path, exist_ok))
+        return True
+
+    sandbox.file_exists = _file_exists
+    sandbox.read_file = _read_file
+    sandbox.write_file = _write_file
+    sandbox.create_directory = _create_directory
+
+    sandbox_repo = AsyncMock()
+    sandbox_repo.update_provider_info = AsyncMock()
+    runtime_state_service = AsyncMock()
+    runtime_state_service.get_runtime_state.return_value = SimpleNamespace(
+        secrets={"API_KEY": "abc"},
+        project_path="/workspace/app",
+        database_url="postgres://db.example/app",
+    )
+    service = SandboxService(
+        sandbox_repo=sandbox_repo,
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(),
+        secret_runtime_state_service=runtime_state_service,
+    )
+    monkeypatch.setattr(service, "_resolve_sandbox_record", AsyncMock(return_value=record))
+    monkeypatch.setattr(service, "_connect_provider", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(service, "_configure_mcp", AsyncMock())
+
+    await service.init_sandbox(
+        object(),
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    assert sandbox.created_directories == [("/workspace/app", True)]
+    assert sandbox.files["/app/.user_env.sh"] == (
+        "# >>> ii-agent managed exports >>>\n"
+        "export API_KEY=abc\n"
+        "export DATABASE_URL=postgres://db.example/app\n"
+        "# <<< ii-agent managed exports <<<\n"
+    )
+    persisted_provider_data = sandbox_repo.update_provider_info.await_args.kwargs["provider_data"]
+    assert persisted_provider_data["ii_agent_secret_sync"]["project_path"] == "/workspace/app"
+    assert "revision" in persisted_provider_data["ii_agent_secret_sync"]
+
+
+@pytest.mark.asyncio
+async def test_init_sandbox_reconciles_against_owner_session_for_shared_sandbox(
+    settings_factory, monkeypatch
+):
+    parent_session_id = uuid.uuid4()
+    child_session_id = uuid.uuid4()
+    sandbox_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=sandbox_id,
+        session_id=parent_session_id,
+        provider=SandboxProviderType.E2B,
+        provider_sandbox_id="sbx-provider",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        provider_data={},
+    )
+    sandbox = SimpleNamespace(
+        sandbox_id=str(sandbox_id),
+        session_id=str(parent_session_id),
+        provider_sandbox_id="sbx-provider",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        metadata={},
+        file_exists=AsyncMock(return_value=False),
+        read_file=AsyncMock(return_value=""),
+        write_file=AsyncMock(),
+        create_directory=AsyncMock(),
+    )
+    sandbox_repo = AsyncMock()
+    sandbox_repo.update_provider_info = AsyncMock()
+    runtime_state_service = AsyncMock()
+    runtime_state_service.get_runtime_state.return_value = None
+    service = SandboxService(
+        sandbox_repo=sandbox_repo,
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(),
+        secret_runtime_state_service=runtime_state_service,
+    )
+    monkeypatch.setattr(service, "_resolve_sandbox_record", AsyncMock(return_value=record))
+    monkeypatch.setattr(service, "_connect_provider", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(service, "_configure_mcp", AsyncMock())
+
+    await service.init_sandbox(
+        object(),
+        session_id=child_session_id,
+        user_id=uuid.uuid4(),
+    )
+
+    runtime_state_service.get_runtime_state.assert_awaited_once()
+    assert (
+        runtime_state_service.get_runtime_state.await_args.kwargs["session_id"] == parent_session_id
+    )
+
+
+@pytest.mark.asyncio
 async def test_list_shell_sessions_prunes_stale_records(settings_factory, monkeypatch):
     service = SandboxService(
         sandbox_repo=FakeSandboxRepo({}),

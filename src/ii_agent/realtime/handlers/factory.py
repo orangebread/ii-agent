@@ -18,7 +18,6 @@ from ii_agent.realtime.handlers.ping import PingHandler
 from ii_agent.realtime.handlers.cancel import CancelHandler
 from ii_agent.realtime.handlers.continue_run import ContinueRunHandler
 from ii_agent.realtime.handlers.enhance_prompt import EnhancePromptHandler
-from ii_agent.realtime.handlers.save_env import SaveEnvHandler
 from ii_agent.realtime.handlers.start_fork import StartForkHandler
 from ii_agent.realtime.handlers.submit_testflight import SubmitTestflightHandler
 from ii_agent.realtime.handlers.apple_auth import (
@@ -72,7 +71,6 @@ class CommandHandlerFactory:
             CommandType.ENHANCE_PROMPT: EnhancePromptHandler(pubsub=ps, container=ct),
             CommandType.PUBLISH_PROJECT: PublishProjectHandler(pubsub=ps, container=ct),
             CommandType.PUBLISH_CLOUD_RUN: CloudRunPublishHandler(pubsub=ps, container=ct),
-            CommandType.SAVE_ENV: SaveEnvHandler(pubsub=ps, container=ct),
             CommandType.START_FORK: StartForkHandler(
                 pubsub=ps,
                 query_handler=query_handler,

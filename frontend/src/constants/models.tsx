@@ -121,6 +121,11 @@ export const PROVIDERS_NAME: { [key: string]: string } = {
     custom: 'Custom'
 }
 
+export const RUNTIME_PRODUCT = {
+    CODEX: 'codex',
+    CLAUDE_CODE: 'claude_code'
+} as const
+
 /**
  * Maps BE Provider value (e.g. "Anthropic", "Google") to
  * the FE UI key used for logos and PROVIDERS_NAME lookup.
@@ -139,4 +144,69 @@ export function getProviderKey(model: { provider?: string }): string {
         return PROVIDER_TO_UI_KEY[model.provider] ?? 'custom'
     }
     return 'custom'
+}
+
+export function getRuntimeProductLabel(model: IModel): string | null {
+    if (model.runtime_product === RUNTIME_PRODUCT.CODEX) {
+        return 'Codex'
+    }
+    if (model.runtime_product === RUNTIME_PRODUCT.CLAUDE_CODE) {
+        return 'Claude Code'
+    }
+    return null
+}
+
+export function matchesFeatureModel(model: IModel, feature?: string | null): boolean {
+    if (feature === RUNTIME_PRODUCT.CODEX) {
+        return model.runtime_product === RUNTIME_PRODUCT.CODEX
+    }
+    if (feature === RUNTIME_PRODUCT.CLAUDE_CODE) {
+        return model.runtime_product === RUNTIME_PRODUCT.CLAUDE_CODE
+    }
+    return true
+}
+
+export function getVisibleModelsForFeature(
+    models: IModel[],
+    feature?: string | null
+): IModel[] {
+    return models.filter((model) => matchesFeatureModel(model, feature))
+}
+
+export function isSelectableModel(model: IModel): boolean {
+    return model.is_selectable !== false
+}
+
+export function getSelectableModels(models: IModel[]): IModel[] {
+    return models.filter(isSelectableModel)
+}
+
+export function getSelectableModelsForFeature(
+    models: IModel[],
+    feature?: string | null
+): IModel[] {
+    return getSelectableModels(models).filter((model) =>
+        matchesFeatureModel(model, feature)
+    )
+}
+
+export function getPreferredModelIdForFeature(
+    models: IModel[],
+    feature: string | null | undefined,
+    currentSelectedModelId?: string
+): string | undefined {
+    const allSelectableModels = getSelectableModels(models)
+    const featureSelectableModels = getSelectableModelsForFeature(models, feature)
+
+    if (feature === RUNTIME_PRODUCT.CODEX || feature === RUNTIME_PRODUCT.CLAUDE_CODE) {
+        const currentFeatureModel = featureSelectableModels.find(
+            (model) => model.id === currentSelectedModelId
+        )
+        return currentFeatureModel?.id ?? featureSelectableModels[0]?.id
+    }
+
+    const currentSelectableModel = allSelectableModels.find(
+        (model) => model.id === currentSelectedModelId
+    )
+    return currentSelectableModel?.id ?? allSelectableModels[0]?.id
 }

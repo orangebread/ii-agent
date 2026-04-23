@@ -13,6 +13,7 @@ from ii_agent.core.db.base import Base
 if TYPE_CHECKING:
     from ii_agent.users.models import User
     from ii_agent.sessions.models import Session
+    from ii_agent.settings.provider_connections.models import ProviderConnection
 
 
 class ModelSetting(Base):
@@ -22,6 +23,7 @@ class ModelSetting(Base):
         model_id: Model identifier (e.g. "claude-sonnet-4-6", "gpt-4o").
         provider: Provider name (e.g. "Anthropic", "OpenAI", "Google", "Custom").
         encrypted_api_key: Encrypted API key for authentication.
+        provider_connection_id: Optional provider-backed OAuth credential source.
         base_url: Custom base URL for API endpoints.
         display_name: Human-readable label shown in the UI.
         configs: JSONB bag for provider-specific settings (temperature, thinking_tokens,
@@ -41,6 +43,11 @@ class ModelSetting(Base):
     model_id: Mapped[str] = mapped_column(String)
     provider: Mapped[Provider] = mapped_column(String)
     encrypted_api_key: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    provider_connection_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("provider_connections.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     base_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     display_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     params: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
@@ -52,6 +59,10 @@ class ModelSetting(Base):
     # Relationships
     user: Mapped[Optional["User"]] = relationship("User", back_populates="model_settings")
     sessions: Mapped[list["Session"]] = relationship("Session", back_populates="model_setting")
+    provider_connection: Mapped[Optional["ProviderConnection"]] = relationship(
+        "ProviderConnection",
+        back_populates="model_settings",
+    )
 
     # Indexes & constraints
     __table_args__ = (
@@ -72,4 +83,5 @@ class ModelSetting(Base):
             unique=True,
             postgresql_where=text("user_id IS NULL"),
         ),
+        Index("idx_model_settings_provider_connection_id", "provider_connection_id"),
     )

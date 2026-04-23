@@ -49,6 +49,8 @@ class ErrorCode(StrEnum):
     INSUFFICIENT_CREDITS = "insufficient_credits"
 
     # Execution
+    PROVIDER_CONTRACT_ERROR = "provider_contract_error"
+    PROVIDER_CONFIG_ERROR = "provider_config_error"
     EXECUTION_ERROR = "execution_error"
     UNEXPECTED_ERROR = "unexpected_error"
     INTERNAL_ERROR = "internal_error"
@@ -93,6 +95,8 @@ ERROR_MESSAGES: dict[ErrorCode, str] = {
     ErrorCode.SANDBOX_CONNECTION_FAILED: "Could not connect to the sandbox environment.",
     ErrorCode.SOURCE_DOWNLOAD_FAILED: "Failed to download source files from the sandbox.",
     ErrorCode.INSUFFICIENT_CREDITS: "Insufficient credits. Please add more credits to continue.",
+    ErrorCode.PROVIDER_CONTRACT_ERROR: "The selected model backend rejected the request contract.",
+    ErrorCode.PROVIDER_CONFIG_ERROR: "The selected model provider is not configured correctly.",
     ErrorCode.EXECUTION_ERROR: "An error occurred during execution.",
     ErrorCode.UNEXPECTED_ERROR: "An unexpected error occurred. Please try again.",
     ErrorCode.INTERNAL_ERROR: "An internal server error occurred.",

@@ -7,16 +7,12 @@ import {
     Lock,
     Key,
     Loader2,
-    X,
-    Check,
-    AlertTriangle
+    X
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '../ui/button'
 import { Input } from '../ui/input'
 import { useTranslation } from 'react-i18next'
-import { selectProjectId, useAppSelector } from '@/state'
-import { projectService } from '@/services/project.service'
 
 export interface Secret {
     key: string
@@ -38,15 +34,18 @@ interface SecretsInputProps {
      */
     disabled?: boolean
     /**
-     * Session ID for saving secrets via projectService.
+     * Session ID for continuing the paused run after the user supplies secrets.
      * Required for interactive mode.
      */
     sessionId?: string
     /**
-     * Callback when user confirms (after saving secrets or for "continue anyway").
+     * Callback when user confirms the provided secret values.
      * Required for interactive mode.
      */
-    onConfirm?: (confirmed: boolean) => void
+    onConfirm?: (
+        confirmed: boolean,
+        userInput?: Record<string, string>
+    ) => void
     /**
      * Callback when user cancels.
      */
@@ -63,7 +62,6 @@ export const SecretsInput = ({
     onCancel
 }: SecretsInputProps) => {
     const { t } = useTranslation()
-    const projectId = useAppSelector(selectProjectId)
 
     const [isSubmitting, setIsSubmitting] = useState(false)
     const [secretValues, setSecretValues] = useState<Record<string, string>>(
@@ -101,45 +99,12 @@ export const SecretsInput = ({
         }
 
         setIsSubmitting(true)
-        try {
-            // Save secrets using project service
-            await projectService.addProjectSecrets(sessionId, secretsObject)
-
-            toast.success(t('agent.secrets.toasts.saved'))
-
-            // Continue the run after saving secrets
-            onConfirm(true)
-        } catch (error) {
-            console.error('Failed to save secrets:', error)
-            toast.error(t('agent.secrets.errors.saveFailed'))
-            setIsSubmitting(false)
-        }
+        onConfirm(true, secretsObject)
     }
 
     // Determine if we're in interactive mode
     const isInteractive = !readOnly && !disabled && sessionId && onConfirm
     const inputsDisabled = isSubmitting || disabled
-
-    // Show project not initialized warning for interactive mode
-    if (isInteractive && !projectId) {
-        return (
-            <div className="mt-3 border border-grey rounded-xl p-4 bg-firefly/[0.18] dark:bg-sky-blue/[0.18]">
-                <div className="flex items-center gap-2 mb-3">
-                    <AlertTriangle className="size-4 text-firefly dark:text-sky-blue" />
-                    <span className="text-sm font-medium text-firefly dark:text-sky-blue">
-                        {t('agent.secrets.projectNotInited')}
-                    </span>
-                </div>
-                <Button
-                    onClick={() => onConfirm(true)}
-                    className="w-full bg-firefly text-sky-blue dark:bg-sky-blue dark:text-black font-medium py-2 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2 hover:opacity-90"
-                >
-                    <Check className="size-4" />
-                    {t('agent.secrets.continueAnyway')}
-                </Button>
-            </div>
-        )
-    }
 
     return (
         <div className="mt-3 space-y-3 bg-firefly/[0.18] dark:bg-sky-blue/[0.18] border border-grey rounded-xl p-4">

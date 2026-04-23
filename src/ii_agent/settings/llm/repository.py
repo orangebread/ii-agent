@@ -60,6 +60,24 @@ class ModelSettingRepository(BaseRepository[ModelSetting]):
         result = await db.execute(query)
         return list(result.scalars().all())
 
+    async def find_provider_managed_by_user(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        *,
+        provider: str | None = None,
+    ) -> list[ModelSetting]:
+        """List provider-backed model settings for a user."""
+        query = select(ModelSetting).where(
+            ModelSetting.user_id == user_id,
+            ModelSetting.provider_connection_id.is_not(None),
+        )
+        if provider:
+            query = query.where(ModelSetting.provider == provider)
+        query = query.order_by(ModelSetting.created_at)
+        result = await db.execute(query)
+        return list(result.scalars().all())
+
     async def find_all_system_models(self, db: AsyncSession) -> list[ModelSetting]:
         """List all system-level LLM settings (user_id is NULL)."""
         query = (
@@ -79,7 +97,7 @@ class ModelSettingRepository(BaseRepository[ModelSetting]):
         """Get a system-level setting by model_id."""
         result = await db.execute(
             select(ModelSetting).where(
-                ModelSetting.id == model_id,
+                ModelSetting.model_id == model_id,
                 ModelSetting.user_id.is_(None),
                 ModelSetting.config_type == "system",
             )
@@ -103,3 +121,37 @@ class ModelSettingRepository(BaseRepository[ModelSetting]):
         """Delete an LLM setting."""
         await db.delete(setting)
         await db.flush()
+
+    # ------------------------------------------------------------------
+    # Backward-compatible aliases for older callers/tests
+    # ------------------------------------------------------------------
+
+    async def get_by_id_and_user(
+        self, db: AsyncSession, setting_id: uuid.UUID, user_id: uuid.UUID
+    ) -> ModelSetting | None:
+        return await self.find_by_id_and_user_id(db, setting_id, user_id)
+
+    async def get_by_model_and_user(
+        self, db: AsyncSession, model_id: str, user_id: uuid.UUID
+    ) -> ModelSetting | None:
+        return await self.find_by_model_and_user(db, model_id, user_id)
+
+    async def list_by_user(
+        self,
+        db: AsyncSession,
+        user_id: uuid.UUID,
+        provider: str | None = None,
+        config_type: str | None = None,
+    ) -> list[ModelSetting]:
+        return await self.find_all_by_user(
+            db,
+            user_id,
+            provider=provider,
+            config_type=config_type,
+        )
+
+    async def list_system(self, db: AsyncSession) -> list[ModelSetting]:
+        return await self.find_all_system_models(db)
+
+    async def get_system_by_model(self, db: AsyncSession, model_id: str) -> ModelSetting | None:
+        return await self.find_system_model_by_model_id(db, model_id)

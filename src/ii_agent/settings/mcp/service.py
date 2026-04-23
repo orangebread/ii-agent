@@ -322,6 +322,51 @@ class MCPSettingService:
                 return setting
         return None
 
+    async def resolve_runtime_setting_for_run(
+        self,
+        db: AsyncSession,
+        *,
+        user_id: uuid.UUID | str,
+        session_id: uuid.UUID | None = None,
+        provider_connection_id: uuid.UUID | None = None,
+        requested_tool_type: str | None = None,
+    ) -> Optional[MCPSetting]:
+        """Resolve the runtime setting that should back a specific run."""
+        if provider_connection_id is not None:
+            runtime_settings = await self._repo.list_runtime_settings_by_user(
+                db,
+                user_id,
+                only_active=True,
+            )
+            for setting in runtime_settings:
+                if getattr(setting, "provider_connection_id", None) != provider_connection_id:
+                    continue
+                if await self._is_usable_runtime_setting(
+                    db,
+                    user_id=user_id,
+                    setting=setting,
+                ):
+                    return setting
+
+        if requested_tool_type is not None:
+            requested_setting = await self._repo.get_by_user_and_tool_type(
+                db,
+                user_id,
+                requested_tool_type,
+            )
+            if requested_setting and await self._is_usable_runtime_setting(
+                db,
+                user_id=user_id,
+                setting=requested_setting,
+            ):
+                return requested_setting
+
+        return await self.resolve_effective_runtime_setting(
+            db,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
     async def configure_codex(
         self,
         db: AsyncSession,

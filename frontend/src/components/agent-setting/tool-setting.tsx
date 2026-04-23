@@ -28,6 +28,7 @@ import ClaudeCodeSetting from './claude-code-setting'
 import { selectQuestionMode } from '@/state'
 import { useTranslation } from 'react-i18next'
 import { hasCodexAuth } from '@/lib/codex'
+import { useAuth } from '@/contexts/auth-context'
 
 interface ToolSettingProps {
     className?: string
@@ -50,6 +51,7 @@ enum TOOL {
 const ToolSetting = ({ className }: ToolSettingProps) => {
     const { t } = useTranslation()
     const dispatch = useAppDispatch()
+    const { refreshAvailableModels } = useAuth()
     const toolSettings = useAppSelector(selectToolSettings)
     const chatToolSettings = useAppSelector(selectChatToolSettings)
     const questionMode = useAppSelector(selectQuestionMode)
@@ -429,6 +431,9 @@ const ToolSetting = ({ className }: ToolSettingProps) => {
             await fetchCodexStatus()
             // Refresh Claude Code status to sync toggle state
             await fetchClaudeCodeStatus()
+            // Refresh model inventory so newly connected OAuth providers
+            // become selectable without requiring a full page reload.
+            await refreshAvailableModels()
 
             toast.success(t('agentSetting.toolSetting.toasts.configSaved'))
         } catch (error) {

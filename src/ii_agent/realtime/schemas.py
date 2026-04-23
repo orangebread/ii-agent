@@ -35,7 +35,6 @@ class CommandType(StrEnum):
     ENHANCE_PROMPT = "enhance_prompt"
     PUBLISH_PROJECT = "publish"
     PUBLISH_CLOUD_RUN = "publish_cloud_run"
-    SAVE_ENV = "save_env"
     START_FORK = "start_fork"
     SUBMIT_TESTFLIGHT = "submit_testflight"
 
@@ -285,22 +284,6 @@ class CloudRunPublishContent(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Save env content
-# ---------------------------------------------------------------------------
-
-
-class SaveEnvContent(BaseModel):
-    """Payload for saving environment variables and resuming agent loop."""
-
-    command: Literal[CommandType.SAVE_ENV] = CommandType.SAVE_ENV
-    tool_call_id: str
-    tool_name: str
-    secrets: list[dict[str, Any]] | dict[str, str] = []
-    project_directory: str | None = None
-    tool_args: dict[str, Any] | None = None
-
-
-# ---------------------------------------------------------------------------
 # Mobile / Apple content models
 # ---------------------------------------------------------------------------
 
@@ -432,7 +415,6 @@ CommandContent = Annotated[
         ContinueRunContent,
         PublishProjectContent,
         CloudRunPublishContent,
-        SaveEnvContent,
         SubmitTestflightContent,
         AppleAuthLoginContent,
         AppleAuth2FAContent,

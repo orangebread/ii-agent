@@ -15,6 +15,7 @@ from ii_agent.core.db.base import Base, TimestampColumn
 if TYPE_CHECKING:
     from ii_agent.users.models import User
     from ii_agent.settings.mcp.models import MCPSetting
+    from ii_agent.settings.llm.models import ModelSetting
 
 
 class ProviderConnection(Base):
@@ -49,6 +50,10 @@ class ProviderConnection(Base):
     user: Mapped["User"] = relationship("User", back_populates="provider_connections")
     mcp_settings: Mapped[list["MCPSetting"]] = relationship(
         "MCPSetting",
+        back_populates="provider_connection",
+    )
+    model_settings: Mapped[list["ModelSetting"]] = relationship(
+        "ModelSetting",
         back_populates="provider_connection",
     )
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ii_agent.core.db.base import BaseRepository
@@ -42,8 +42,8 @@ class ProviderConnectionRepository(BaseRepository[ProviderConnection]):
         result = await db.execute(
             select(ProviderConnection).where(
                 ProviderConnection.user_id == user_id,
-                ProviderConnection.provider == provider,
-                ProviderConnection.product == product,
+                func.lower(ProviderConnection.provider) == provider.lower(),
+                func.lower(ProviderConnection.product) == product.lower(),
             )
         )
         return result.scalar_one_or_none()

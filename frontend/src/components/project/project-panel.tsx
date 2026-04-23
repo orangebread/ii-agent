@@ -287,12 +287,17 @@ const ProjectPanel = ({
             },
             {}
         )
+
         try {
             setIsSavingSecrets(true)
-            await projectService.addProjectSecrets(sessionId, payload)
+            const response = await projectService.addProjectSecrets(
+                sessionId,
+                payload
+            )
             toast.success(
                 t('project.secrets.toasts.added', { count: secrets.length })
             )
+            maybeNotifyRestartRequired(response.restart_required)
             await fetchSecrets()
         } catch (error) {
             console.error('Failed to add secret', error)
@@ -300,6 +305,17 @@ const ProjectPanel = ({
         } finally {
             setIsSavingSecrets(false)
         }
+    }
+
+    const maybeNotifyRestartRequired = (restartRequired?: boolean) => {
+        if (!restartRequired) {
+            return
+        }
+
+        toast.info(
+            'Existing terminals and development servers may need to be restarted ' +
+                'to pick up updated environment variables.'
+        )
     }
 
     const handleSecretChange = (
@@ -344,8 +360,12 @@ const ProjectPanel = ({
         )
         try {
             setIsSavingSecrets(true)
-            await projectService.replaceProjectSecrets(sessionId, payload)
+            const response = await projectService.replaceProjectSecrets(
+                sessionId,
+                payload
+            )
             toast.success(t('project.secrets.toasts.updated'))
+            maybeNotifyRestartRequired(response.restart_required)
             await fetchSecrets()
         } catch (error) {
             console.error('Failed to edit secret', error)
@@ -367,8 +387,12 @@ const ProjectPanel = ({
         }
         try {
             setIsSavingSecrets(true)
-            await projectService.deleteProjectSecrets(sessionId, [secretKey])
+            const response = await projectService.deleteProjectSecrets(
+                sessionId,
+                [secretKey]
+            )
             toast.success(t('project.secrets.toasts.deleted'))
+            maybeNotifyRestartRequired(response.restart_required)
             await fetchSecrets()
         } catch (error) {
             console.error('Failed to delete secret', error)
@@ -397,8 +421,12 @@ const ProjectPanel = ({
 
         try {
             setIsSavingSecrets(true)
-            await projectService.replaceProjectSecrets(sessionId, payload)
+            const response = await projectService.replaceProjectSecrets(
+                sessionId,
+                payload
+            )
             toast.success(t('project.secrets.toasts.updated'))
+            maybeNotifyRestartRequired(response.restart_required)
             await fetchSecrets()
         } catch (error) {
             console.error('Failed to update secrets', error)

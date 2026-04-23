@@ -7,7 +7,7 @@ import logging
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from uuid import UUID
 
-from .types import ApiType, Provider
+from .types import ApiType, CredentialSource, ModelAvailabilityStatus, Provider
 from ii_agent.settings.llm.types import ConfigType
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 class ModelParams(BaseModel):
     """Provider-specific settings stored in the ``configs`` JSONB column."""
 
+    provider_model_id: str | None = None
     max_retries: int = Field(default=3)
     max_message_chars: int = Field(default=30000)
     temperature: float = Field(default=0.0)
@@ -272,15 +273,24 @@ class ModelConfig(BaseModel):
     model_id: str
     provider: Provider
     api_key: SecretStr | None = None
+    auth_token: SecretStr | None = None
     base_url: str | None = None
+    default_headers: dict[str, str] | None = None
     display_name: str | None = None
     params: ModelParams = Field(default_factory=ModelParams)
     pricing: PricingInfo | None = None
     config_type: ConfigType = ConfigType.SYSTEM
+    credential_source: CredentialSource = CredentialSource.SYSTEM
+    provider_connection_id: UUID | None = None
+    runtime_product: str | None = None
 
     def is_user_model(self) -> bool:
         """Return True when the config originates from a user-provided key."""
         return self.config_type == ConfigType.USER
+
+    def is_provider_managed(self) -> bool:
+        """Return True when execution auth comes from a provider connection."""
+        return self.credential_source == CredentialSource.PROVIDER_OAUTH
 
     @property
     def setting_id(self) -> str:
@@ -386,6 +396,10 @@ class ModelSettingInfo(BaseModel):
     configs: ModelParams | None = None
     pricing: PricingInfo | None = None
     config_type: ConfigType
+    credential_source: CredentialSource = CredentialSource.API_KEY
+    provider_connection_id: UUID | None = None
+    runtime_product: str | None = None
+    is_managed: bool = False
     is_default: bool
     is_active: bool
     has_api_key: bool
@@ -431,6 +445,13 @@ class LLMModelInfo(BaseModel):
     provider: str
     display_name: str | None = None
     source: str = "system"
+    credential_source: CredentialSource = CredentialSource.SYSTEM
+    provider_connection_id: UUID | None = None
+    runtime_product: str | None = None
+    is_managed: bool = False
+    is_selectable: bool = True
+    availability_status: ModelAvailabilityStatus = ModelAvailabilityStatus.AVAILABLE
+    disabled_reason: str | None = None
     base_url: str | None = None
     pricing: PricingInfo | None = None
 

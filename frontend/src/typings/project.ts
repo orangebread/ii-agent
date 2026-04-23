@@ -22,6 +22,7 @@ export type ProjectSecretsResponse = {
     project_id: string
     session_id: string
     secrets: Record<string, unknown>
+    restart_required?: boolean
     updated_at?: string | null
 }
 

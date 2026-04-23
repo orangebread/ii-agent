@@ -2,7 +2,6 @@ from dataclasses import dataclass, field
 import time
 from typing import (
     Any,
-    AsyncIterator,
     Dict,
     List,
     Literal,
@@ -40,8 +39,15 @@ from ii_agent.agents.models.response import ModelResponse
 from ii_agent.agents.runs.agent import RunOutput
 from ii_agent.agents.utils.http import get_default_async_client, get_default_sync_client
 from ii_agent.core.logger import logger
+from ii_agent.settings.llm.openai_responses_contract import (
+    apply_responses_request_contract,
+    apply_responses_session_contract,
+    extract_responses_error_message,
+    is_reasoning_model,
+    merge_responses_instructions,
+)
 
-Roles: TypeAlias = Literal["system", "user", "assistant", "tool"]
+Roles: TypeAlias = Literal["system", "developer", "user", "assistant", "tool"]
 
 
 @dataclass
@@ -101,6 +107,7 @@ class OpenAIResponses(Model):
     role_map: Dict[str, str] = field(
         default_factory=lambda: {
             "system": "developer",
+            "developer": "developer",
             "user": "user",
             "assistant": "assistant",
             "tool": "tool",
@@ -108,10 +115,8 @@ class OpenAIResponses(Model):
     )
 
     def _using_reasoning_model(self) -> bool:
-        """Return True if the contextual used model is a known reasoning model."""
-        return (
-            self.id.startswith("o3") or self.id.startswith("o4-mini") or self.id.startswith("gpt-5")
-        )
+        """Return True if the current model uses reasoning Responses semantics."""
+        return is_reasoning_model(self.id)
 
     def _set_reasoning_request_param(self, base_params: Dict[str, Any]) -> Dict[str, Any]:
         """Set the reasoning request parameter."""
@@ -203,6 +208,35 @@ class OpenAIResponses(Model):
         self.async_client = AsyncOpenAI(**client_params)
         return self.async_client
 
+    def _extract_instructions(self, messages: List[Message]) -> Optional[str]:
+        """Collect system-style messages into the Responses API instructions field."""
+        instruction_parts: List[str] = []
+
+        for message in messages:
+            if message.role not in {"system", "developer"}:
+                continue
+
+            content = message.get_content_string()
+            if content:
+                instruction_parts.append(content)
+
+        return merge_responses_instructions(*instruction_parts)
+
+    def _extract_previous_response_id(self, messages: List[Message]) -> Optional[str]:
+        """Return the most recent provider response id from prior assistant messages."""
+        for message in reversed(messages):
+            if (
+                message.role == "assistant"
+                and hasattr(message, "provider_data")
+                and message.provider_data
+                and "response_id" in message.provider_data
+            ):
+                previous_response_id = message.provider_data["response_id"]
+                logger.debug(f"Using previous_response_id: {previous_response_id}")
+                return previous_response_id
+
+        return None
+
     def get_request_params(
         self,
         messages: Optional[List[Message]] = None,
@@ -216,14 +250,22 @@ class OpenAIResponses(Model):
         Returns:
             Dict[str, Any]: A dictionary of keyword arguments for API requests.
         """
+        previous_response_id = self._extract_previous_response_id(messages) if messages else None
+        session_contract = apply_responses_session_contract(
+            model_name=self.id,
+            base_url=str(self.base_url) if self.base_url is not None else None,
+            store=self.store,
+            include=self.include,
+            previous_response_id=previous_response_id,
+        )
+
         # Define base request parameters
         base_params: Dict[str, Any] = {
-            "include": self.include,
             "max_output_tokens": self.max_output_tokens,
             "max_tool_calls": self.max_tool_calls,
             "metadata": self.metadata,
             "parallel_tool_calls": self.parallel_tool_calls,
-            "store": self.store,
+            "store": session_contract.get("store"),
             "temperature": self.temperature,
             "top_p": self.top_p,
             "truncation": self.truncation,
@@ -249,6 +291,8 @@ class OpenAIResponses(Model):
 
         # Filter out None values
         request_params: Dict[str, Any] = {k: v for k, v in base_params.items() if v is not None}
+        if "include" in session_contract:
+            request_params["include"] = session_contract["include"]
 
         # Deep research models require web_search_preview tool or MCP tool
         if "deep-research" in self.id:
@@ -271,42 +315,17 @@ class OpenAIResponses(Model):
         if tool_choice is not None:
             request_params["tool_choice"] = tool_choice
 
-        # Handle reasoning tools for o3 and o4-mini models
-        if self._using_reasoning_model() and messages is not None:
-            if self.store is False:
-                request_params["store"] = False
-
-                # Add encrypted reasoning content to include if not already present
-                include_list = request_params.get("include", []) or []
-                if "reasoning.encrypted_content" not in include_list:
-                    include_list.append("reasoning.encrypted_content")
-                    if request_params.get("include") is None:
-                        request_params["include"] = include_list
-                    elif isinstance(request_params["include"], list):
-                        request_params["include"].extend(include_list)
-
-            else:
-                request_params["store"] = True
-
-                # Check if the last assistant message has a previous_response_id to continue from
-                previous_response_id = None
-                for msg in reversed(messages):
-                    if (
-                        msg.role == "assistant"
-                        and hasattr(msg, "provider_data")
-                        and msg.provider_data
-                        and "response_id" in msg.provider_data
-                    ):
-                        previous_response_id = msg.provider_data["response_id"]
-                        logger.debug(f"Using previous_response_id: {previous_response_id}")
-                        break
-
-                if previous_response_id:
-                    request_params["previous_response_id"] = previous_response_id
+        if "previous_response_id" in session_contract:
+            request_params["previous_response_id"] = session_contract["previous_response_id"]
 
         # Add additional request params if provided
         if self.request_params:
             request_params.update(self.request_params)
+
+        request_params = apply_responses_request_contract(
+            base_url=str(self.base_url) if self.base_url is not None else None,
+            request_params=request_params,
+        )
 
         if request_params:
             logger.debug(
@@ -414,7 +433,10 @@ class OpenAIResponses(Model):
         return formatted_tools
 
     def _format_messages(
-        self, messages: List[Message]
+        self,
+        messages: List[Message],
+        *,
+        include_system_messages: bool = True,
     ) -> List[Union[Dict[str, Any], ResponseReasoningItem]]:
         """
         Format a message into the format expected by OpenAI.
@@ -430,7 +452,7 @@ class OpenAIResponses(Model):
         messages_to_format = messages
         previous_response_id: Optional[str] = None
 
-        if self._using_reasoning_model() and self.store is not False:
+        if is_reasoning_model(self.id) and self.store is not False:
             # Detect whether we're chaining via previous_response_id. If so, we should NOT
             # re-send prior function_call items; the Responses API already has the state and
             # expects only the corresponding function_call_output items.
@@ -462,9 +484,12 @@ class OpenAIResponses(Model):
                         fc_id_to_call_id[fc_id] = call_id
 
         for message in messages_to_format:
-            if message.role in ["user", "system"]:
+            if message.role in ["user", "system", "developer"]:
+                if message.role in {"system", "developer"} and not include_system_messages:
+                    continue
+
                 message_dict: Dict[str, Any] = {
-                    "role": self.role_map[message.role],
+                    "role": self.role_map.get(message.role, message.role),
                     "content": message.get_content(),
                 }
                 message_dict = {k: v for k, v in message_dict.items() if v is not None}
@@ -526,7 +551,7 @@ class OpenAIResponses(Model):
                 # Only skip re-sending prior function_call items when we have a previous_response_id
                 # (reasoning models). For non-reasoning models, we must include the prior function_call
                 # so the API can associate the subsequent function_call_output by call_id.
-                if self._using_reasoning_model() and previous_response_id is not None:
+                if is_reasoning_model(self.id) and previous_response_id is not None:
                     continue
 
                 for tool_call in message.tool_calls:
@@ -569,12 +594,15 @@ class OpenAIResponses(Model):
         Sends an asynchronous request to the OpenAI Responses API.
         """
         try:
+            instructions = self._extract_instructions(messages)
             request_params = self.get_request_params(
                 messages=messages,
                 response_format=response_format,
                 tools=tools,
                 tool_choice=tool_choice,
             )
+            if instructions:
+                request_params["instructions"] = instructions
 
             if run_response and run_response.metrics:
                 run_response.metrics.set_time_to_first_token()
@@ -583,7 +611,10 @@ class OpenAIResponses(Model):
 
             provider_response = await self.get_async_client().responses.create(
                 model=self.id,
-                input=self._format_messages(messages),  # type: ignore
+                input=self._format_messages(
+                    messages,
+                    include_system_messages=not bool(instructions),
+                ),  # type: ignore
                 **request_params,
             )
 
@@ -597,14 +628,8 @@ class OpenAIResponses(Model):
 
         except RateLimitError as exc:
             logger.error(f"Rate limit error from OpenAI API: {exc}")
-            error_message = exc.response.json().get("error", {})
-            error_message = (
-                error_message.get("message", "Unknown model error")
-                if isinstance(error_message, dict)
-                else error_message
-            )
             raise ModelProviderError(
-                message=error_message,
+                message=extract_responses_error_message(exc),
                 status_code=exc.response.status_code,
                 model_name=self.name,
                 model_id=self.id,
@@ -616,14 +641,8 @@ class OpenAIResponses(Model):
             ) from exc
         except APIStatusError as exc:
             logger.error(f"API status error from OpenAI API: {exc}")
-            error_message = exc.response.json().get("error", {})
-            error_message = (
-                error_message.get("message", "Unknown model error")
-                if isinstance(error_message, dict)
-                else error_message
-            )
             raise ModelProviderError(
-                message=error_message,
+                message=extract_responses_error_message(exc),
                 status_code=exc.response.status_code,
                 model_name=self.name,
                 model_id=self.id,
@@ -673,17 +692,20 @@ class OpenAIResponses(Model):
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
         run_response: Optional[RunOutput] = None,
-    ) -> AsyncIterator[ModelResponse]:
+    ):
         """
         Sends an asynchronous streaming request to the OpenAI Responses API.
         """
         try:
+            instructions = self._extract_instructions(messages)
             request_params = self.get_request_params(
                 messages=messages,
                 response_format=response_format,
                 tools=tools,
                 tool_choice=tool_choice,
             )
+            if instructions:
+                request_params["instructions"] = instructions
             tool_use: Dict[str, Any] = {}
 
             if run_response and run_response.metrics:
@@ -693,7 +715,10 @@ class OpenAIResponses(Model):
 
             async_stream = await self.get_async_client().responses.create(
                 model=self.id,
-                input=self._format_messages(messages),  # type: ignore
+                input=self._format_messages(
+                    messages,
+                    include_system_messages=not bool(instructions),
+                ),  # type: ignore
                 stream=True,
                 **request_params,
             )
@@ -707,14 +732,8 @@ class OpenAIResponses(Model):
 
         except RateLimitError as exc:
             logger.error(f"Rate limit error from OpenAI API: {exc}")
-            error_message = exc.response.json().get("error", {})
-            error_message = (
-                error_message.get("message", "Unknown model error")
-                if isinstance(error_message, dict)
-                else error_message
-            )
             raise ModelProviderError(
-                message=error_message,
+                message=extract_responses_error_message(exc),
                 status_code=exc.response.status_code,
                 model_name=self.name,
                 model_id=self.id,
@@ -726,14 +745,8 @@ class OpenAIResponses(Model):
             ) from exc
         except APIStatusError as exc:
             logger.error(f"API status error from OpenAI API: {exc}")
-            error_message = exc.response.json().get("error", {})
-            error_message = (
-                error_message.get("message", "Unknown model error")
-                if isinstance(error_message, dict)
-                else error_message
-            )
             raise ModelProviderError(
-                message=error_message,
+                message=extract_responses_error_message(exc),
                 status_code=exc.response.status_code,
                 model_name=self.name,
                 model_id=self.id,
@@ -1073,3 +1086,17 @@ class OpenAIResponses(Model):
         metrics.input_tokens = input_tokens
 
         return metrics
+
+
+@dataclass
+class CodexResponses(OpenAIResponses):
+    """Responses transport for ChatGPT-backed Codex runtimes."""
+
+    name: str = "CodexResponses"
+    max_output_tokens: Optional[int] = None
+    parallel_tool_calls: Optional[bool] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    truncation: Optional[Literal["auto", "disabled"]] = None
+    user: Optional[str] = None
+    service_tier: Optional[Literal["auto", "default", "flex", "priority"]] = None

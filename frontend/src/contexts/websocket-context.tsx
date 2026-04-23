@@ -53,12 +53,13 @@ export function SocketIOProvider({
     const isFromNewQuestion = useAppSelector(selectIsFromNewQuestion)
     const activeSessionId = useAppSelector(selectActiveSessionId)
     const wsConnectionState = useAppSelector(selectWsConnectionState)
+    const currentSessionId = sessionId || activeSessionId || undefined
     const [socket, setSocket] = useState<Socket | null>(null)
     const [isSessionReady, setIsSessionReady] = useState(false)
     const connectionRef = useRef<Socket | null>(null)
     const isConnectingRef = useRef(false)
     const handleEventRef = useRef(handleEvent)
-    const sessionIdRef = useRef(sessionId)
+    const sessionIdRef = useRef<string | undefined>(currentSessionId)
     const isFromNewQuestionRef = useRef(isFromNewQuestion)
     const dispatch = useAppDispatch()
     const sessionInitializedRef = useRef(false)
@@ -72,13 +73,11 @@ export function SocketIOProvider({
 
     // Keep sessionIdRef in sync with sessionId (from URL params) or activeSessionId (from Redux)
     // Priority: sessionId (URL is source of truth) > activeSessionId (fallback for home page)
-    const currentSessionId = sessionId || activeSessionId || undefined
-
-    // Reset session initialization flag when sessionId changes or on initial load
-    if (sessionIdRef.current !== currentSessionId) {
+    useEffect(() => {
         sessionInitializedRef.current = false
         sessionIdRef.current = currentSessionId
-        // Reset agent initialization whenever we have a sessionId (including initial load)
+        setIsSessionReady(false)
+
         if (currentSessionId) {
             console.log(
                 'WebSocket: Resetting isAgentInitialized for session change:',
@@ -86,18 +85,7 @@ export function SocketIOProvider({
             )
             dispatch(setAgentInitialized(false))
         }
-    }
-
-    useEffect(() => {
-        setIsSessionReady(false)
-    }, [currentSessionId])
-
-    // Also reset on initial mount if sessionId is present
-    useEffect(() => {
-        if (sessionId && sessionIdRef.current === sessionId) {
-            dispatch(setAgentInitialized(false))
-        }
-    }, [sessionId, dispatch]) // Run on mount and when sessionId changes
+    }, [currentSessionId, dispatch])
 
     const connectSocket = useCallback(() => {
         // Prevent duplicate connections - check if already connected or connecting

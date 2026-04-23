@@ -9,15 +9,20 @@ from typing import Any, Dict
 import socketio
 from pydantic import ValidationError
 
+from ii_agent.agents.exceptions import ModelAuthenticationError, ModelProviderError
 from ii_agent.core.db import get_db_session_local
+from ii_agent.core.exceptions import ValidationError as CoreValidationError
 from ii_agent.auth import jwt_handler
 from ii_agent.core.container import ApplicationContainer
+from ii_agent.realtime.events.app_events import ErrorCode
 from ii_agent.realtime.pubsub import AsyncIOPubSub
 from ii_agent.realtime.handlers.factory import CommandHandlerFactory
 from ii_agent.realtime.schemas import ChatMessageRequest
 from ii_agent.realtime.session_store import create_session_store
 from ii_agent.sessions import SessionInfo
 from ii_agent.sessions.service import SessionService
+from ii_agent.settings.llm.exceptions import LLMSettingUnavailableError
+from ii_agent.settings.llm.types import ModelAvailabilityStatus
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +76,11 @@ class SocketIOManager:
             request = ChatMessageRequest.model_validate(data)
         except ValidationError as exc:
             logger.warning("Invalid chat_message envelope from %s: %s", sid, exc.errors())
-            await self._emit_error(sid, f"Invalid message format: {exc.errors()}")
+            await self._emit_error(
+                sid,
+                f"Invalid message format: {exc.errors()}",
+                error_code=ErrorCode.VALIDATION_ERROR,
+            )
             return
 
         # ── Auth & session checks ────────────────────────────────────────
@@ -81,11 +90,19 @@ class SocketIOManager:
         session = await self._require_session(request.session_uuid)
 
         if not session:
-            await self._emit_error(sid, "Chat Session is required!")
+            await self._emit_error(
+                sid,
+                "Chat Session is required!",
+                error_code=ErrorCode.SESSION_NOT_FOUND,
+            )
             return
 
         if not user_id or not self._is_session_owner(user_id, session):
-            await self._emit_error(sid, "Access denied: only the session owner can send messages")
+            await self._emit_error(
+                sid,
+                "Access denied: only the session owner can send messages",
+                error_code=ErrorCode.AUTH_ERROR,
+            )
             return
 
         command = request.content.command
@@ -94,10 +111,15 @@ class SocketIOManager:
             if handler:
                 await handler.handle(request.content, session)
             else:
-                await self._emit_error(sid, f"Unknown command: {command}")
+                await self._emit_error(
+                    sid,
+                    f"Unknown command: {command}",
+                    error_code=ErrorCode.VALIDATION_ERROR,
+                )
         except Exception as e:
             logger.exception("Error handling chat message: %s", e)
-            await self._emit_error(sid, "Error processing message")
+            error_code, message = self._classify_error(e)
+            await self._emit_error(sid, message, error_code=error_code)
 
     async def connect(self, sid: str, environ: Dict, auth: Dict | None) -> bool:
         if not auth or "token" not in auth:
@@ -224,16 +246,44 @@ class SocketIOManager:
         except ValueError:
             return None
 
-    async def _emit_error(self, sid: str, message: str) -> None:
+    def _classify_error(self, exc: Exception) -> tuple[ErrorCode, str]:
+        """Map uncaught realtime exceptions to stable frontend error codes."""
+        if isinstance(exc, (ValidationError, CoreValidationError)):
+            return ErrorCode.VALIDATION_ERROR, str(exc)
+
+        if isinstance(exc, LLMSettingUnavailableError):
+            if exc.availability_status == ModelAvailabilityStatus.MISSING_CREDENTIALS:
+                return ErrorCode.MISSING_CREDENTIALS, str(exc)
+            return ErrorCode.PROVIDER_CONFIG_ERROR, str(exc)
+
+        if isinstance(exc, ModelAuthenticationError):
+            return ErrorCode.PROVIDER_CONFIG_ERROR, str(exc)
+
+        if isinstance(exc, ModelProviderError):
+            message = str(exc)
+            lowered = message.lower()
+            if "instructions are required" in lowered or "store must be set to false" in lowered:
+                return ErrorCode.PROVIDER_CONTRACT_ERROR, message
+            return ErrorCode.EXECUTION_ERROR, message
+
+        return ErrorCode.INTERNAL_ERROR, "Error processing message"
+
+    async def _emit_error(
+        self,
+        sid: str,
+        message: str,
+        *,
+        error_code: ErrorCode = ErrorCode.INTERNAL_ERROR,
+    ) -> None:
         """Emit an error directly to a socket (pre-session or auth errors)."""
         await self.sio.emit(
             "chat_event",
             {
                 "group": "system",
                 "name": "system.error",
-                "error_code": "internal_error",
+                "error_code": error_code.value,
                 "detail": message,
-                "content": {"message": message, "error_code": "internal_error"},
+                "content": {"message": message, "error_code": error_code.value},
             },
             to=sid,
         )

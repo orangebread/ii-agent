@@ -21,13 +21,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ii_agent.agents.models.openai.responses import OpenAIResponses
+from ii_agent.agents.models.openai.responses import CodexResponses, OpenAIResponses
 from ii_agent.agents.models.message import Message
 from ii_agent.agents.models.response import ModelResponse
 from ii_agent.agents.exceptions import (
     ModelAuthenticationError,
     ModelProviderError,
 )
+from ii_agent.core.config.llm_config import LLMConfig
+from ii_agent.agents.models.utils import get_model
 from ii_agent.settings.llm import Provider
 
 
@@ -120,8 +122,32 @@ class TestOpenAIResponsesDefaults:
     def test_role_map_defaults(self):
         m = OpenAIResponses()
         assert m.role_map["system"] == "developer"
+        assert m.role_map["developer"] == "developer"
         assert m.role_map["user"] == "user"
         assert m.role_map["assistant"] == "assistant"
+
+
+class TestCodexResponsesDefaults:
+    def test_codex_defaults_omit_openai_specific_tuning_knobs(self):
+        m = CodexResponses()
+        assert m.max_output_tokens is None
+        assert m.parallel_tool_calls is None
+        assert m.truncation is None
+        assert m.temperature is None
+
+    def test_get_model_uses_codex_responses_for_codex_runtime(self):
+        model = get_model(
+            Provider.OPENAI,
+            LLMConfig(
+                model="gpt-5.4",
+                provider=Provider.OPENAI,
+                api_key="test-key",
+                base_url="https://chatgpt.com/backend-api/codex",
+                runtime_product="codex",
+            ),
+        )
+
+        assert isinstance(model, CodexResponses)
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +312,70 @@ class TestOpenAIResponsesGetRequestParams:
         params = m.get_request_params(messages=msgs)
         assert params.get("previous_response_id") == "resp_old_123"
 
+    def test_codex_backend_forces_store_false_for_reasoning_models(self):
+        m = _make_openai_responses(
+            api_key="key",
+            id="gpt-5.4",
+            store=True,
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        msgs = [
+            Message(
+                role="assistant",
+                content="old resp",
+                provider_data={"response_id": "resp_old_123"},
+            ),
+            Message(role="user", content="continue"),
+        ]
+        params = m.get_request_params(messages=msgs)
+        assert params["store"] is False
+        assert "reasoning.encrypted_content" in params.get("include", [])
+        assert "previous_response_id" not in params
+
+    def test_codex_backend_omits_max_output_tokens(self):
+        m = _make_openai_responses(
+            api_key="key",
+            id="gpt-5.4",
+            max_output_tokens=1024,
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        params = m.get_request_params(messages=[Message(role="user", content="continue")])
+        assert "max_output_tokens" not in params
+
+    def test_codex_backend_omits_truncation(self):
+        m = _make_openai_responses(
+            api_key="key",
+            id="gpt-5.4",
+            truncation="auto",
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        params = m.get_request_params(messages=[Message(role="user", content="continue")])
+        assert "truncation" not in params
+
+    def test_codex_backend_allows_only_minimal_request_subset(self):
+        m = _make_openai_responses(
+            api_key="key",
+            id="gpt-5.4",
+            parallel_tool_calls=True,
+            temperature=0.2,
+            top_p=0.9,
+            metadata={"trace_id": "abc"},
+            base_url="https://chatgpt.com/backend-api/codex",
+        )
+        params = m.get_request_params(
+            messages=[Message(role="user", content="continue")],
+            tools=[{"type": "function", "function": {"name": "test", "parameters": {}}}],
+            tool_choice="auto",
+        )
+        assert params["store"] is False
+        assert "include" in params
+        assert "tools" in params
+        assert params["tool_choice"] == "auto"
+        assert "parallel_tool_calls" not in params
+        assert "temperature" not in params
+        assert "top_p" not in params
+        assert "metadata" not in params
+
     def test_request_params_merged(self):
         m = _make_openai_responses(api_key="key", request_params={"custom": "val"})
         assert m.get_request_params().get("custom") == "val"
@@ -367,6 +457,15 @@ class TestOpenAIResponsesFormatMessages:
         msgs = [Message(role="system", content="Be helpful")]
         result = m._format_messages(msgs)
         assert result[0]["role"] == "developer"
+
+    def test_system_message_can_be_excluded_from_input(self):
+        m = _make_openai_responses(api_key="key")
+        msgs = [
+            Message(role="system", content="Be helpful"),
+            Message(role="user", content="Hello"),
+        ]
+        result = m._format_messages(msgs, include_system_messages=False)
+        assert [msg["role"] for msg in result] == ["user"]
 
     def test_tool_result_formatted_as_function_call_output(self):
         m = _make_openai_responses(api_key="key")
@@ -758,6 +857,30 @@ class TestOpenAIResponsesAinvokeErrors:
         with pytest.raises(ModelProviderError):
             await m.ainvoke(msgs, assistant)
 
+    @pytest.mark.asyncio
+    async def test_api_status_error_uses_detail_message(self):
+        import httpx
+        from openai import BadRequestError
+
+        m = _make_openai_responses(api_key="key")
+        request = httpx.Request("POST", "https://example.com/responses")
+        response = httpx.Response(
+            400,
+            request=request,
+            json={"detail": "Instructions are required"},
+        )
+        err = BadRequestError(
+            "Instructions are required",
+            response=response,
+            body={"detail": "Instructions are required"},
+        )
+        m.async_client.responses.create = AsyncMock(side_effect=err)
+        msgs = [Message(role="user", content="hi")]
+        assistant = Message(role="assistant", content="")
+        with pytest.raises(ModelProviderError) as excinfo:
+            await m.ainvoke(msgs, assistant)
+        assert excinfo.value.message == "Instructions are required"
+
 
 # ---------------------------------------------------------------------------
 # 12. ainvoke happy path
@@ -788,3 +911,74 @@ class TestOpenAIResponsesAinvokeHappyPath:
         assert isinstance(result, ModelResponse)
         assert result.role == "assistant"
         assert result.content == "Hello from OpenAI!"
+
+    @pytest.mark.asyncio
+    async def test_ainvoke_passes_system_message_as_instructions(self):
+        m = _make_openai_responses(api_key="test_key")
+
+        msg_output = _make_response_output(
+            "message",
+            content=[_make_response_output("output_text", text="Hello", annotations=[])],
+        )
+        resp = _make_api_response([msg_output], response_id="resp_instr", output_text="Hello")
+        m.async_client.responses.create = AsyncMock(return_value=resp)
+
+        msgs = [
+            Message(role="system", content="Be helpful"),
+            Message(role="user", content="Hi"),
+        ]
+        assistant = Message(role="assistant", content="")
+
+        await m.ainvoke(msgs, assistant)
+
+        request_kwargs = m.async_client.responses.create.await_args.kwargs
+        assert request_kwargs["instructions"] == "Be helpful"
+        assert [msg["role"] for msg in request_kwargs["input"]] == ["user"]
+
+
+class _FakeAsyncStream:
+    def __init__(self, events):
+        self._events = iter(events)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._events)
+        except StopIteration as exc:
+            raise StopAsyncIteration from exc
+
+
+class TestOpenAIResponsesAinvokeStream:
+    @pytest.mark.asyncio
+    async def test_ainvoke_stream_passes_system_message_as_instructions(self):
+        m = _make_openai_responses(api_key="test_key")
+
+        response_stub = MagicMock()
+        response_stub.id = "resp_stream"
+
+        created_event = MagicMock()
+        created_event.type = "response.created"
+        created_event.response = response_stub
+
+        done_event = MagicMock()
+        done_event.type = "response.output_text.done"
+        done_event.text = "Hello"
+
+        m.async_client.responses.create = AsyncMock(
+            return_value=_FakeAsyncStream([created_event, done_event])
+        )
+
+        msgs = [
+            Message(role="system", content="Be helpful"),
+            Message(role="user", content="Hi"),
+        ]
+        assistant = Message(role="assistant", content="")
+
+        responses = [response async for response in m.ainvoke_stream(msgs, assistant)]
+
+        request_kwargs = m.async_client.responses.create.await_args.kwargs
+        assert request_kwargs["instructions"] == "Be helpful"
+        assert [msg["role"] for msg in request_kwargs["input"]] == ["user"]
+        assert responses[-1].content == "Hello"

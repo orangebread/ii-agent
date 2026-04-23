@@ -135,18 +135,3 @@ class ProjectService:
 
         project.production_url = production_url
         return await self._project_repo.update(db, project)
-
-    async def update_session_project_secrets(
-        self,
-        db: AsyncSession,
-        *,
-        project_id: uuid.UUID,
-        secrets: dict[str, Any],
-    ) -> Optional[Project]:
-        """Persist the latest secrets for the user's session project."""
-        project = await self._project_repo.get_by_id(db, project_id)
-        if not project:
-            return None
-
-        project.secrets_json = secrets
-        return await self._project_repo.update(db, project)

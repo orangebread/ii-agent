@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid as _uuid_mod
 from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
@@ -43,6 +44,7 @@ def _make_llm_config(
     azure_endpoint: Optional[str] = None,
     azure_api_version: Optional[str] = None,
     base_url: Optional[str] = None,
+    runtime_product: Optional[str] = None,
     temperature: Optional[float] = None,
     thinking_tokens: Optional[int] = None,
 ) -> LLMConfig:
@@ -57,6 +59,8 @@ def _make_llm_config(
         kwargs["azure_api_version"] = azure_api_version
     if base_url is not None:
         kwargs["base_url"] = base_url
+    if runtime_product is not None:
+        kwargs["runtime_product"] = runtime_product
     if temperature is not None:
         kwargs["temperature"] = temperature
     if thinking_tokens is not None:
@@ -64,7 +68,7 @@ def _make_llm_config(
     return LLMConfig(**kwargs)
 
 
-def _make_provider(config: Optional[LLMConfig] = None) -> "OpenAIProvider":
+def _make_provider(config: Optional[LLMConfig] = None):
     from ii_agent.chat.llm.openai import OpenAIProvider
     import openai
 
@@ -75,9 +79,31 @@ def _make_provider(config: Optional[LLMConfig] = None) -> "OpenAIProvider":
         return OpenAIProvider(config or _make_llm_config())
 
 
-import uuid as _uuid_mod
+class TestLLMProviderFactoryCodex:
+    def test_openai_codex_runtime_uses_codex_provider(self):
+        from ii_agent.chat.llm.factory import LLMProviderFactory
+        from ii_agent.chat.llm.openai import CodexProvider
 
-_SESSION_ID = "test-session-123"
+        provider_class = LLMProviderFactory._resolve_provider_class(
+            _make_llm_config(
+                model="gpt-5.4",
+                base_url="https://chatgpt.com/backend-api/codex",
+                runtime_product="codex",
+            )
+        )
+
+        assert provider_class is CodexProvider
+
+    def test_standard_openai_runtime_uses_openai_provider(self):
+        from ii_agent.chat.llm.factory import LLMProviderFactory
+        from ii_agent.chat.llm.openai import OpenAIProvider
+
+        provider_class = LLMProviderFactory._resolve_provider_class(_make_llm_config())
+
+        assert provider_class is OpenAIProvider
+
+
+_SESSION_ID = "00000000-0000-4000-8000-000000000123"
 _MSG_ID = _uuid_mod.uuid4()
 
 
@@ -286,7 +312,7 @@ class TestOpenAIProviderInit:
                 azure_endpoint="https://my-resource.openai.azure.com",
                 azure_api_version="2024-01-01",
             )
-            provider = OpenAIProvider(config)
+            OpenAIProvider(config)
             mock_cls.assert_called_once()
 
     def test_custom_base_url_passed_to_client(self):
@@ -375,7 +401,7 @@ class TestGetContentType:
 
 
 class TestConvertMessagesSystem:
-    def test_system_message_converted(self):
+    def test_system_message_excluded_from_input(self):
         provider = _make_provider()
         msg = Message(
             id=_uuid_mod.uuid4(),
@@ -384,9 +410,17 @@ class TestConvertMessagesSystem:
             parts=[TextContent(text="You are helpful.")],
         )
         result = provider._convert_messages([msg], _make_empty_container_file())
-        assert len(result) == 1
-        assert result[0]["role"] == "system"
-        assert result[0]["content"][0]["text"] == "You are helpful."
+        assert result == []
+
+    def test_extract_system_instructions_returns_joined_text(self):
+        provider = _make_provider()
+        msg = Message(
+            id=_uuid_mod.uuid4(),
+            session_id=_SESSION_ID,
+            role=MessageRole.SYSTEM,
+            parts=[TextContent(text="You are helpful.")],
+        )
+        assert provider._extract_system_instructions([msg]) == "You are helpful."
 
     def test_system_message_without_text_skipped(self):
         provider = _make_provider()
@@ -619,7 +653,7 @@ class TestConvertMessagesToolResult:
             "c1",
             "tool",
             StorybookProgressContent(
-                storybook_id="sb1",
+                storybook_id="00000000-0000-4000-8000-000000000411",
                 storybook_name="Book",
                 total_pages=10,
                 completed_pages=5,
@@ -638,7 +672,11 @@ class TestConvertMessagesToolResult:
         msg = _make_tool_result_message(
             "c1",
             "tool",
-            StorybookResultContent(storybook_id="sb1", storybook_name="Book", pages=[]),
+            StorybookResultContent(
+                storybook_id="00000000-0000-4000-8000-000000000412",
+                storybook_name="Book",
+                pages=[],
+            ),
         )
         result = provider._convert_messages([msg], _make_empty_container_file())
         data = json.loads(result[0]["output"])

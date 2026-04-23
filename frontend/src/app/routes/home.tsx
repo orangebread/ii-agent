@@ -15,7 +15,6 @@ import GoogleDrivePicker from '@/components/google-drive-picker'
 import HomeMobile from '@/components/home-mobile'
 import LearnMore from '@/components/learn-more'
 import { Logo } from '@/components/logo'
-import { OpenAIOnboardingGate } from '@/components/openai-onboarding-gate'
 import PublicHomePage from '@/components/public-home-page'
 import QuestionInput from '@/components/question-input'
 import Sidebar from '@/components/sidebar'
@@ -34,7 +33,6 @@ import { useIsMobile } from '@/hooks/use-mobile'
 import { useQuestionHandlers } from '@/hooks/use-question-handlers'
 import { useSessionManager } from '@/hooks/use-session-manager'
 import type { GitHubRepository } from '@/services/connector.service'
-import { settingsService } from '@/services/settings.service'
 import {
     selectCurrentQuestion,
     selectQuestionMode,
@@ -45,8 +43,6 @@ import {
 } from '@/state'
 import { WebSocketConnectionState } from '@/typings'
 import { QUESTION_MODE } from '@/typings/agent'
-import type { IMcpSettings } from '@/typings/settings'
-import { hasCodexAuth } from '@/lib/codex'
 
 function AuthenticatedHomeContent() {
     const { t } = useTranslation()
@@ -376,52 +372,7 @@ function AuthenticatedHomeContent() {
 
 export function HomePage() {
     const { user, isLoading } = useAuth()
-    const [isCheckingCodex, setIsCheckingCodex] = useState(true)
-    const [codexSetting, setCodexSetting] = useState<IMcpSettings | null>(null)
-
-    useEffect(() => {
-        if (isLoading) {
-            return
-        }
-
-        if (!user) {
-            setCodexSetting(null)
-            setIsCheckingCodex(false)
-            return
-        }
-
-        let isCancelled = false
-
-        const loadCodexSetting = async () => {
-            try {
-                const setting = await settingsService.getCodexSettings()
-                if (!isCancelled) {
-                    setCodexSetting(setting)
-                }
-            } catch (error) {
-                if (!isCancelled) {
-                    console.error(
-                        'Error loading Codex settings for onboarding:',
-                        error
-                    )
-                    setCodexSetting(null)
-                }
-            } finally {
-                if (!isCancelled) {
-                    setIsCheckingCodex(false)
-                }
-            }
-        }
-
-        setIsCheckingCodex(true)
-        void loadCodexSetting()
-
-        return () => {
-            isCancelled = true
-        }
-    }, [isLoading, user])
-
-    if (isLoading || (user && isCheckingCodex)) {
+    if (isLoading) {
         return (
             <div className="flex h-screen items-center justify-center text-lg">
                 Loading...
@@ -431,14 +382,6 @@ export function HomePage() {
 
     if (!user) {
         return <PublicHomePage />
-    }
-
-    if (!hasCodexAuth(codexSetting)) {
-        return (
-            <OpenAIOnboardingGate
-                onConnected={(setting) => setCodexSetting(setting)}
-            />
-        )
     }
 
     return <AuthenticatedHomeContent />

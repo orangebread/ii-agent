@@ -124,6 +124,7 @@ const AgentSetting = ({ isOpen, onOpenChange }: AgentSettingProps) => {
                 <div className="space-y-4 flex-1 overflow-auto px-3 md:px-6 md:pb-12">
                     <ModelSetting
                         className={activeTab === TABS.MODEL ? '' : 'hidden'}
+                        isActive={isOpen && activeTab === TABS.MODEL}
                     />
                     <ToolSetting
                         className={activeTab === TABS.TOOLS ? '' : 'hidden'}
