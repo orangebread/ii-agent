@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from ii_agent.core.exceptions import ServiceUnavailableError
 from ii_agent.integrations.connectors.composio.auth_config_service import AuthConfigService
 from ii_agent.integrations.connectors.composio.connected_account_service import (
     ConnectedAccountService,
@@ -50,6 +51,29 @@ async def test_toolkit_service_resolves_client_on_first_use():
 
     assert result["success"] is True
     get_client.assert_called_once_with(None)
+
+
+@pytest.mark.asyncio
+async def test_toolkit_service_reports_invalid_server_api_key():
+    class FakeAuthError(Exception):
+        pass
+
+    fake_client = MagicMock()
+    fake_client.toolkits.get.side_effect = FakeAuthError("bad composio key")
+
+    with (
+        patch(
+            "ii_agent.integrations.connectors.composio.toolkit_service.ComposioAuthenticationError",
+            FakeAuthError,
+        ),
+        patch(
+            "ii_agent.integrations.connectors.composio.toolkit_service.ComposioClient.get_client",
+            return_value=fake_client,
+        ),
+    ):
+        service = ToolkitService()
+        with pytest.raises(ServiceUnavailableError, match="server Composio API key is invalid"):
+            await service.list_toolkits()
 
 
 @pytest.mark.asyncio

@@ -10,6 +10,7 @@ from ii_server.core.workspace import WorkspaceManager
 from ii_agent.agents.prompts.agent_prompts import get_system_prompt_for_agent_type
 from ii_agent.agents.sandboxes import Sandbox
 from ii_agent.agents.agent import IIAgent
+from ii_agent.agents.codex_runtime import CodexRuntimeAgent
 from ii_agent.agents.skills.base import SkillCreator
 from ii_agent.agents.connector import BaseConnectorTool
 from ii_agent.agents.factory.tools import AgentConfigManager, AgentType
@@ -94,50 +95,13 @@ class AgentFactory:
         has_task_agent = tool_args.get("task_agent", False)
         has_researcher = tool_args.get("deep_research", False)
         has_design_doc = tool_args.get("design_document", False)
-
-        # Get LLM client and model
-        provider = llm_config.provider
-        # Resolve model
-        model = get_model(provider, llm_config=llm_config)
-
-        # Resolve required tool names based on agent type, model, and tool_args
-        agent_tools = AgentToolManager.resolve_tools(
-            agent_type=agent_type,
-            model_name=model.id,
-            tool_args=tool_args,
-        )
-
-        # Add SkillTool if skill creator is available
         skill_prompt_section: Optional[str] = None
+        skill_tool = None
         if skill_creator is not None:
             skill_tool = await skill_creator.create_skill_tool()
             if skill_tool:
-                agent_tools.append(skill_tool)
                 skill_prompt_section = skill_tool.description
                 logger.info(f"Added SkillTool with {len(skill_tool._skills_registry)} skills")
-
-        # Add connector tools if available
-        if connector_tool is not None:
-            try:
-                connector_tools = await connector_tool.create_connector_tools(
-                    workspace_manager=workspace_manager,
-                )
-                if connector_tools:
-                    logger.info(
-                        f"[V1 Factory] Received {len(connector_tools)} connector tools from loader"
-                    )
-                    logger.debug(
-                        f"[V1 Factory] Connector tool names: {[t.name for t in connector_tools]}"
-                    )
-                    agent_tools.extend(connector_tools)
-                    logger.info(
-                        f"[V1 Factory] Successfully added {len(connector_tools)} connector tools to agent"
-                    )
-
-            except Exception as e:
-                logger.error(f"[V1 Factory] Failed to load connector tools: {e}", exc_info=True)
-
-        AgentToolManager.log_tool_summary(agent_tools, f"Agent {agent_type.value}")
 
         # Generate system prompt if not provided
         if system_prompt is None:
@@ -161,6 +125,66 @@ class AgentFactory:
             )
 
         system_prompt = _append_prompt_section(system_prompt, skill_prompt_section)
+
+        if getattr(llm_config, "runtime_product", None) == "codex":
+            if connector_tool is not None:
+                logger.info(
+                    f"Ignoring connector tool injection for Codex runtime session {session_id}"
+                )
+            if has_task_agent:
+                logger.info(
+                    f"Ignoring task-agent delegation for Codex runtime session {session_id}"
+                )
+
+            agent = CodexRuntimeAgent(
+                user_id=user_id,
+                session_id=session_id,
+                llm_config=llm_config,
+                name=f"{agent_type.value}_agent",
+                system_message=system_prompt,
+                metadata=metadata,
+            )
+            agent.set_id()
+            logger.info(f"Created {agent_type.value} Codex runtime agent")
+            return agent
+
+        # Get LLM client and model
+        provider = llm_config.provider
+        # Resolve model
+        model = get_model(provider, llm_config=llm_config)
+
+        # Resolve required tool names based on agent type, model, and tool_args
+        agent_tools = AgentToolManager.resolve_tools(
+            agent_type=agent_type,
+            model_name=model.id,
+            tool_args=tool_args,
+        )
+
+        if skill_tool is not None:
+            agent_tools.append(skill_tool)
+
+        # Add connector tools if available
+        if connector_tool is not None:
+            try:
+                connector_tools = await connector_tool.create_connector_tools(
+                    workspace_manager=workspace_manager,
+                )
+                if connector_tools:
+                    logger.info(
+                        f"[V1 Factory] Received {len(connector_tools)} connector tools from loader"
+                    )
+                    logger.debug(
+                        f"[V1 Factory] Connector tool names: {[t.name for t in connector_tools]}"
+                    )
+                    agent_tools.extend(connector_tools)
+                    logger.info(
+                        f"[V1 Factory] Successfully added {len(connector_tools)} connector tools to agent"
+                    )
+
+            except Exception as e:
+                logger.error(f"[V1 Factory] Failed to load connector tools: {e}", exc_info=True)
+
+        AgentToolManager.log_tool_summary(agent_tools, f"Agent {agent_type.value}")
 
         sub_agents = []
         if has_task_agent:

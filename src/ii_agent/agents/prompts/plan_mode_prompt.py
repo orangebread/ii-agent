@@ -84,8 +84,8 @@ For "Build me a todo app with authentication":
 
 ## Important Rules
 
-1. ONLY output valid JSON - no explanations, no markdown code blocks
-2. Do NOT include any tools or execute any actions
+1. Submit the plan by calling the `submit_plan` tool exactly once
+2. Do not return freeform prose, markdown, or raw JSON outside the tool call
 3. Focus on planning, not implementation
 4. Consider the user's likely intentions even if not explicitly stated
 5. Include both technical and user-facing aspects in milestone details

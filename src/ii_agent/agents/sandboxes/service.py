@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ii_agent.agents.sandboxes.base import Sandbox
+from ii_agent.agents.sandboxes.docker import DockerSandbox
 from ii_agent.agents.sandboxes.e2b import E2BSandbox
 from ii_agent.agents.sandboxes.exceptions import SandboxCreationError, SandboxNotFoundException
 from ii_agent.agents.sandboxes.models import AgentSandbox
@@ -39,6 +40,42 @@ from ii_agent.sessions.repository import SessionRepository
 
 
 _SHELL_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _build_codex_runtime_auth_json(credentials: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize stored provider credentials into the auth.json shape Codex expects."""
+    if not credentials:
+        return None
+
+    api_key = credentials.get("OPENAI_API_KEY")
+    if isinstance(api_key, str) and api_key:
+        return {"OPENAI_API_KEY": api_key}
+
+    auth_mode = credentials.get("auth_mode")
+    tokens = credentials.get("tokens")
+    if isinstance(tokens, dict):
+        required_token_fields = ("id_token", "access_token", "refresh_token")
+        if all(
+            isinstance(tokens.get(field), str) and tokens.get(field)
+            for field in required_token_fields
+        ):
+            from ii_agent.settings.mcp.service import _build_openai_codex_auth_json
+
+            return _build_openai_codex_auth_json(
+                {
+                    "id_token": tokens["id_token"],
+                    "access_token": tokens["access_token"],
+                    "refresh_token": tokens["refresh_token"],
+                }
+            )
+
+        if auth_mode and (
+            isinstance(tokens.get("refresh_token"), str)
+            or isinstance(tokens.get("access_token"), str)
+        ):
+            return credentials
+
+    return None
 
 
 class SandboxService:
@@ -99,7 +136,16 @@ class SandboxService:
 
         # 4. Connect or create provider sandbox
         if record.provider_sandbox_id:
-            sandbox_mgr = await self._connect_provider(record)
+            try:
+                sandbox_mgr = await self._connect_provider(record)
+            except SandboxNotFoundException:
+                if record.provider != SandboxProviderType.DOCKER:
+                    raise
+                logger.info(
+                    f"Recreating missing Docker sandbox {record.provider_sandbox_id} for session {record.session_id}"
+                )
+                record.provider_sandbox_id = None
+                sandbox_mgr = await self._create_provider(record, metadata)
         else:
             sandbox_mgr = await self._create_provider(record, metadata)
 
@@ -151,7 +197,19 @@ class SandboxService:
         )
         if record is None:
             return None
-        return await self._connect_provider(record)
+        try:
+            return await self._connect_provider(record)
+        except SandboxNotFoundException:
+            if record.provider != SandboxProviderType.DOCKER:
+                raise
+            session = await self._session_repo.get_by_id(db, record.session_id)
+            if session is None or getattr(session, "user_id", None) is None:
+                raise
+            return await self.init_sandbox(
+                db,
+                session_id=record.session_id,
+                user_id=session.user_id,
+            )
 
     async def get_sandbox_by_session_id(
         self,
@@ -316,9 +374,7 @@ class SandboxService:
 
             if stale_session_names:
                 logger.info(
-                    "Pruning stale PTY sessions for sandbox %s: %s",
-                    sandbox.sandbox_id,
-                    stale_session_names,
+                    f"Pruning stale PTY sessions for sandbox {sandbox.sandbox_id}: {stale_session_names}"
                 )
                 await self._save_shell_sessions(
                     sandbox.sandbox_id,
@@ -603,12 +659,24 @@ class SandboxService:
                 session_id=str(record.session_id),
                 metadata=metadata,
             )
+        if record.provider == SandboxProviderType.DOCKER:
+            return await DockerSandbox.create(
+                sandbox_id=str(record.id),
+                session_id=str(record.session_id),
+                metadata=metadata,
+            )
         raise SandboxCreationError(f"Unsupported provider: {record.provider}")
 
     async def _connect_provider(self, record: AgentSandbox) -> Sandbox:
         """Connect to an existing provider sandbox."""
         if record.provider == SandboxProviderType.E2B:
             return await E2BSandbox.connect(
+                sandbox_id=str(record.id),
+                session_id=str(record.session_id),
+                provider_sandbox_id=record.provider_sandbox_id,
+            )
+        if record.provider == SandboxProviderType.DOCKER:
+            return await DockerSandbox.connect(
                 sandbox_id=str(record.id),
                 session_id=str(record.session_id),
                 provider_sandbox_id=record.provider_sandbox_id,
@@ -637,10 +705,7 @@ class SandboxService:
                 sessions[session_name] = ShellSessionRecord.model_validate(raw_record)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "Invalid shell session metadata for sandbox %s session %s: %s",
-                    sandbox_id,
-                    session_name,
-                    exc,
+                    f"Invalid shell session metadata for sandbox {sandbox_id} session {session_name}: {exc}"
                 )
         return sessions
 
@@ -708,9 +773,7 @@ class SandboxService:
             )
             if _usable(parent_record):
                 logger.info(
-                    "Session %s sharing sandbox from parent %s",
-                    session_id,
-                    session.parent_session_id,
+                    f"Session {session_id} sharing sandbox from parent {session.parent_session_id}"
                 )
                 return parent_record
 
@@ -774,14 +837,15 @@ class SandboxService:
         db: AsyncSession,
     ) -> None:
         """Configure MCP servers on a sandbox."""
+        sandbox_url: str | None = None
         try:
             sandbox_url = await sandbox.expose_port(self._config.mcp.port)
-            # Build and set credentials
             sandbox.get_mcp_client(sandbox_url=sandbox_url)
+        except Exception as e:
+            logger.info(f"Skipping MCP port registration for sandbox {sandbox.sandbox_id}: {e}")
 
-            # Register user MCP servers
+        try:
             await self._register_user_mcp_servers(sandbox, user_id, sandbox_url, db)
-
         except Exception as e:
             logger.warning(f"Failed to configure MCP for sandbox {sandbox.sandbox_id}: {e}")
 
@@ -789,7 +853,7 @@ class SandboxService:
         self,
         sandbox: Sandbox,
         user_id: uuid.UUID,
-        sandbox_url: str,
+        sandbox_url: str | None,
         db: AsyncSession,
     ) -> None:
         """Register user's custom + composio MCP servers with the sandbox."""
@@ -852,23 +916,44 @@ class SandboxService:
         if composio_mcp_servers:
             merged_mcp_servers.update(composio_mcp_servers)
 
-        async with MCPClient(sandbox_url) as client:
-            if selected_runtime and selected_runtime.provider_connection_id:
-                connection = await provider_connection_svc.get_connection_model(
-                    db,
-                    connection_id=selected_runtime.provider_connection_id,
-                    user_id=user_id,
+        credentials = {}
+        if selected_runtime and selected_runtime.provider_connection_id:
+            connection = await provider_connection_svc.get_connection_model(
+                db,
+                connection_id=selected_runtime.provider_connection_id,
+                user_id=user_id,
+            )
+            if connection and provider_connection_svc.has_usable_credentials(connection):
+                credentials = provider_connection_svc.get_credentials_dict(connection)
+
+        if selected_tool_type == "codex" and credentials:
+            auth_json = _build_codex_runtime_auth_json(credentials)
+            if auth_json is None:
+                sandbox_identifier = getattr(
+                    sandbox,
+                    "sandbox_id",
+                    str(getattr(sandbox, "session_id", "unknown")),
                 )
-                credentials = {}
-                if connection and provider_connection_svc.has_usable_credentials(connection):
-                    credentials = provider_connection_svc.get_credentials_dict(connection)
-                if selected_tool_type == "codex" and credentials:
-                    store_path = f"{self._config.sandbox.user}/.codex/auth.json"
-                    await sandbox.write_file(store_path, json.dumps(credentials))
-                    await client.register_codex()
-                elif selected_tool_type == "claude_code" and credentials:
-                    store_path = f"{self._config.sandbox.user}/.claude/.credentials.json"
-                    await sandbox.write_file(store_path, json.dumps(credentials))
+                logger.warning(
+                    f"Skipping Codex auth materialization for sandbox {sandbox_identifier}: stored credentials are not convertible to auth.json"
+                )
+            else:
+                store_path = f"{self._config.sandbox.user}/.codex/auth.json"
+                await sandbox.write_file(store_path, json.dumps(auth_json))
+        elif selected_tool_type == "claude_code" and credentials:
+            store_path = f"{self._config.sandbox.user}/.claude/.credentials.json"
+            await sandbox.write_file(store_path, json.dumps(credentials))
+
+        if sandbox_url is None:
+            if merged_mcp_servers:
+                logger.info(
+                    f"Skipping registration of {len(merged_mcp_servers)} MCP servers for sandbox {sandbox.sandbox_id} because no sandbox URL is available"
+                )
+            return
+
+        async with MCPClient(sandbox_url) as client:
+            if selected_tool_type == "codex" and credentials:
+                await client.register_codex()
 
             if merged_mcp_servers:
                 logger.info(f"Registering {len(merged_mcp_servers)} MCP servers for user {user_id}")

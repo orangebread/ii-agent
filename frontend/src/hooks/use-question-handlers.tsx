@@ -38,6 +38,7 @@ import {
     selectSelectedGitHubRepository,
     selectBuildMode,
     selectHasPlan,
+    setBuildMode,
     moveSessionToTop,
     selectChats,
     selectProjects,
@@ -329,17 +330,30 @@ export function useQuestionHandlers() {
             dispatch(resetSlideTemplate())
         }
 
-        // Map BUILD_MODE to backend build_mode values
-        // Force 'build' mode when feature is not GENERAL and not WEBSITE_BUILD
-        const buildModeValue =
-            selectedFeature !== AGENT_TYPE.GENERAL &&
-            selectedFeature !== AGENT_TYPE.WEBSITE_BUILD
-                ? 'build'
-                : buildMode === BUILD_MODE.PLAN
-                  ? hasPlan
-                      ? 'modify_plan'
-                      : 'plan'
-                  : 'build'
+        const supportsPlanWorkflow =
+            selectedModel?.runtime_product !== 'codex' &&
+            (selectedFeature === AGENT_TYPE.GENERAL ||
+                selectedFeature === AGENT_TYPE.WEBSITE_BUILD ||
+                selectedFeature === AGENT_TYPE.SLIDE ||
+                selectedFeature === AGENT_TYPE.SLIDE_NANO_BANANA)
+        const shouldAutoPlanWebsiteBuild =
+            supportsPlanWorkflow &&
+            selectedFeature === AGENT_TYPE.WEBSITE_BUILD &&
+            !hasPlan
+
+        // Keep explicit Plan Mode behavior, and default first-time website builds
+        // into the plan flow so they use the Plan -> Build -> Result harness.
+        const buildModeValue = supportsPlanWorkflow
+            ? buildMode === BUILD_MODE.PLAN || shouldAutoPlanWebsiteBuild
+                ? hasPlan
+                    ? 'modify_plan'
+                    : 'plan'
+                : 'build'
+            : 'build'
+
+        if (shouldAutoPlanWebsiteBuild && buildMode !== BUILD_MODE.PLAN) {
+            dispatch(setBuildMode(BUILD_MODE.PLAN))
+        }
 
         // Prepare the query content
         const queryContent = {

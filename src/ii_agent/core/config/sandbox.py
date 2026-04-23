@@ -56,6 +56,11 @@ class SandboxSettings(BaseSettings):
         description="E2B API key (required when using E2B provider)",
     )
 
+    docker_image: str = Field(
+        default="ii-agent-codex-sandbox:local",
+        description="Container image used when using the Docker sandbox provider",
+    )
+
     e2b_template_id: str = Field(
         default="base",
         description="E2B template ID for custom sandbox environments",

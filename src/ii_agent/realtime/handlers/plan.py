@@ -68,6 +68,13 @@ class PlanHandler(BaseCommandHandler[PlanCommandContent]):
         if not is_valid or not session_info or not llm_config:
             return
 
+        if getattr(llm_config, "runtime_product", None) == "codex":
+            await self._send_error_event(
+                session_info.id,
+                message="Plan mode is not supported for Codex runtime sessions yet.",
+            )
+            return
+
         await self._handle_plan(query_command, session_info, llm_config)
 
     async def _handle_plan(

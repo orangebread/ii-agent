@@ -451,7 +451,12 @@ class ModelSettingService:
         catalog_by_model = {entry.model_id: entry for entry in catalog_entries}
         dirty = False
 
-        if connection is None or not self._provider_connection_service.supports_provider_managed_model_catalog(connection):
+        if (
+            connection is None
+            or not self._provider_connection_service.supports_provider_managed_model_catalog(
+                connection
+            )
+        ):
             for row in managed_rows:
                 if _resolved_provider_model_id(row) in catalog_by_model:
                     await self._repo.delete(db, row)
@@ -473,9 +478,10 @@ class ModelSettingService:
             params = ModelParams.model_validate(_get_setting_params(row) or {})
             params.provider_model_id = entry.model_id
             _set_setting_params(row, params.model_dump(exclude_none=True))
-            row.pricing = row.pricing or PricingInfo.get_default_pricing(
-                entry.model_id, entry.provider
-            ).model_dump()
+            row.pricing = (
+                row.pricing
+                or PricingInfo.get_default_pricing(entry.model_id, entry.provider).model_dump()
+            )
             row.config_type = ConfigType.USER.value
             row.is_active = True
             row.updated_at = now
@@ -643,6 +649,7 @@ class ModelSettingService:
             return ProviderManagedExecutionState(
                 availability_status=ModelAvailabilityStatus.UNSUPPORTED,
                 disabled_reason=_unsupported_provider_reason(setting, connection=connection),
+                runtime_product=getattr(connection, "product", None),
             )
 
         credentials = self._provider_connection_service.get_live_model_credentials(connection)
@@ -958,17 +965,10 @@ def _supports_provider_managed_execution(
     provider = _normalized_provider_key(getattr(connection, "provider", None))
     setting_provider = _normalized_provider_key(getattr(setting, "provider", None))
     return (
-        (
-            provider == "anthropic"
-            and runtime_product == "claude_code"
-            and setting_provider == "anthropic"
-        )
-        or (
-            provider == "openai"
-            and runtime_product == "codex"
-            and setting_provider == "openai"
-        )
-    )
+        provider == "anthropic"
+        and runtime_product == "claude_code"
+        and setting_provider == "anthropic"
+    ) or (provider == "openai" and runtime_product == "codex" and setting_provider == "openai")
 
 
 def _unsupported_provider_reason(
@@ -977,10 +977,7 @@ def _unsupported_provider_reason(
     connection: ProviderConnection | None = None,
 ) -> str:
     """Explain why a provider-backed model cannot be executed."""
-    if (
-        _normalized_runtime_product(getattr(connection, "product", None)) == "codex"
-        or _normalized_provider_key(getattr(setting, "provider", None)) == "openai"
-    ):
+    if _normalized_provider_key(getattr(setting, "provider", None)) == "openai":
         return "Reconnect OpenAI/Codex OAuth to unlock Codex-backed model execution."
     if _normalized_runtime_product(getattr(connection, "product", None)) == "claude_code":
         return "Reconnect Anthropic Claude OAuth to unlock Claude Code-backed model execution."
@@ -1049,7 +1046,9 @@ def _to_model_setting_info(
     if include_key:
         return ModelSettingInfoWithKey(
             **shared,
-            api_key=_decrypt_api_key(setting).get_secret_value() if _decrypt_api_key(setting) else None,
+            api_key=_decrypt_api_key(setting).get_secret_value()
+            if _decrypt_api_key(setting)
+            else None,
         )
 
     return ModelSettingInfo(**shared)

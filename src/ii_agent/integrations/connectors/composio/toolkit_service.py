@@ -1,11 +1,13 @@
 """Composio Toolkit Service - handles toolkit discovery and metadata."""
 
 from typing import List, Dict, Any, Optional
+from composio_client import AuthenticationError as ComposioAuthenticationError
 from pydantic import BaseModel
 
 from .client import ComposioClient
 from .cache_service import ComposioCacheService
 
+from ii_agent.core.exceptions import ServiceUnavailableError
 from ii_agent.core.logger import logger
 
 
@@ -349,7 +351,12 @@ class ToolkitService:
             logger.debug("Using cached toolkits list")
             return cached_result
 
-        apps_list = self._get_client().toolkits.get()
+        try:
+            apps_list = self._get_client().toolkits.get()
+        except ComposioAuthenticationError as exc:
+            raise ServiceUnavailableError(
+                "Composio toolkit discovery is unavailable because the server Composio API key is invalid."
+            ) from exc
         items = apps_list if isinstance(apps_list, list) else []
 
         # Convert apps to ToolkitInfo, filtering out no_auth apps

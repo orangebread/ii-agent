@@ -467,9 +467,22 @@ class SessionService:
             )
 
         requested_runtime_tool_type = _runtime_tool_type_for_agent(agent_type)
-        runtime_selection_required = bool(
-            requested_runtime_tool_type or getattr(model_config, "runtime_product", None)
+        selected_runtime_product = requested_runtime_tool_type or getattr(
+            model_config, "runtime_product", None
         )
+        runtime_selection_required = bool(selected_runtime_product)
+        sandbox_settings = getattr(self._config, "sandbox", None)
+        if (
+            selected_runtime_product == "codex"
+            and getattr(sandbox_settings, "provider", None) == "e2b"
+            and not getattr(sandbox_settings, "e2b_api_key", None)
+        ):
+            return ValidatedSessionResult(
+                is_valid=False,
+                session_info=session_info,
+                llm_config=model_config,
+                error_code="missing_credentials",
+            )
         runtime_setting = None
         if mcp_setting_service is not None and runtime_selection_required:
             runtime_setting = await mcp_setting_service.resolve_runtime_setting_for_run(

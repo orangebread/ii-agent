@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useParams } from 'react-router'
 
 import { type MiniTool } from '@/constants/media-tools'
@@ -45,7 +45,7 @@ import {
     useAppDispatch,
     useAppSelector
 } from '@/state'
-import { AGENT_TYPE, QUESTION_MODE } from '@/typings'
+import { AGENT_TYPE, BUILD_MODE, QUESTION_MODE } from '@/typings'
 import type { AdvancedModeSettings } from '@/typings/chat'
 import { useTranslation } from 'react-i18next'
 import BuildModeDropdown, {
@@ -161,6 +161,8 @@ const QuestionInput = ({
 }: QuestionInputProps) => {
     const { t } = useTranslation()
     const dispatch = useAppDispatch()
+    const { sessionId } = useParams()
+    const location = useLocation()
     const requireClearFiles = useAppSelector(selectRequireClearFiles)
     const uploadedFiles = useAppSelector(selectUploadedFiles)
     const currentMessageFileIds = useAppSelector(selectCurrentMessageFileIds)
@@ -196,6 +198,33 @@ const QuestionInput = ({
         }
     }, [availableModels, dispatch, selectedFeature, selectedModel])
 
+    const selectedModelConfig = useMemo(
+        () => availableModels.find((model) => model.id === selectedModel),
+        [availableModels, selectedModel]
+    )
+
+    useEffect(() => {
+        if (
+            selectedModelConfig?.runtime_product === 'codex' &&
+            buildMode === BUILD_MODE.PLAN
+        ) {
+            dispatch(setBuildMode(BUILD_MODE.BUILD))
+        }
+    }, [selectedModelConfig?.runtime_product, buildMode, dispatch])
+
+    const availableBuildModes = useMemo(() => {
+        const baseModes =
+            location.pathname === '/'
+                ? LANDING_AVAILABLE_MODES
+                : [BUILD_MODE.BUILD, BUILD_MODE.DESIGN, BUILD_MODE.PLAN]
+
+        if (selectedModelConfig?.runtime_product === 'codex') {
+            return baseModes.filter((mode) => mode !== BUILD_MODE.PLAN)
+        }
+
+        return baseModes
+    }, [location.pathname, selectedModelConfig?.runtime_product])
+
     const {
         chatMediaPreference,
         hasMiniToolSelection,
@@ -222,8 +251,6 @@ const QuestionInput = ({
         addFrame: handleVideoFrameAdd,
         removeFrame: handleVideoFrameRemove
     } = useVideoFrameUpload()
-    const { sessionId } = useParams()
-    const location = useLocation()
     const normalizedPathname = location.pathname.replace(/\/+$/, '')
     const isChatRoute =
         normalizedPathname === '/chat' || normalizedPathname.endsWith('/chat')
@@ -1278,11 +1305,7 @@ const QuestionInput = ({
                                                 dispatch(setBuildMode(mode))
                                             }
                                             disabled={isDisabled || isLoading}
-                                            availableModes={
-                                                location.pathname === '/'
-                                                    ? LANDING_AVAILABLE_MODES
-                                                    : undefined
-                                            }
+                                            availableModes={availableBuildModes}
                                         />
                                     )}
                                 {selectedRepository && (

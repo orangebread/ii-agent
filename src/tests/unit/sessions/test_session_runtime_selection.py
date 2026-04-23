@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -135,3 +135,136 @@ async def test_validate_and_prepare_for_run_syncs_runtime_to_selected_provider_m
     assert session.model_setting_id == model_setting_id
     assert session.mcp_setting_id == runtime_setting_id
     assert session.agent_type == "codex"
+
+
+@pytest.mark.asyncio
+async def test_validate_and_prepare_for_run_rejects_codex_when_e2b_key_missing():
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    model_setting_id = uuid.uuid4()
+    session = _make_session(session_id, user_id)
+    service = SessionService(
+        session_repo=FakeSessionRepo(session),
+        event_repo=SimpleNamespace(),
+        run_task_service=SimpleNamespace(),
+        file_store=SimpleNamespace(),
+        file_service=SimpleNamespace(),
+        sandbox_repo=SimpleNamespace(),
+        cache=FakeCache(),
+        config=SimpleNamespace(
+            workspace_path="/tmp/workspace",
+            sandbox=SimpleNamespace(provider="e2b", e2b_api_key=None),
+        ),
+    )
+    db = SimpleNamespace()
+
+    async def _flush():
+        return None
+
+    db.flush = _flush
+
+    model_config = ModelConfig(
+        id=model_setting_id,
+        model_id="gpt-5.4",
+        provider=Provider.OPENAI,
+        provider_connection_id=uuid.uuid4(),
+        runtime_product="codex",
+        config_type=ConfigType.USER,
+        credential_source=CredentialSource.PROVIDER_OAUTH,
+    )
+    model_setting_service = SimpleNamespace(
+        resolve_model_config=AsyncMock(return_value=model_config),
+    )
+    mcp_setting_service = SimpleNamespace(
+        resolve_runtime_setting_for_run=AsyncMock(return_value=SimpleNamespace(id=uuid.uuid4())),
+    )
+
+    with patch("ii_agent.sessions.service.sa_inspect") as mock_inspect:
+        mock_state = MagicMock()
+        mock_state.unloaded = {"project"}
+        mock_inspect.return_value = mock_state
+
+        result = await service.validate_and_prepare_for_run(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+            source="user",
+            model_id=str(model_setting_id),
+            text="Use Codex for this run",
+            agent_type="codex",
+            credit_service=FakeCreditService(),
+            model_setting_service=model_setting_service,
+            mcp_setting_service=mcp_setting_service,
+        )
+
+    assert result.is_valid is False
+    assert result.error_code == "missing_credentials"
+    mcp_setting_service.resolve_runtime_setting_for_run.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_validate_and_prepare_for_run_allows_codex_with_docker_provider():
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    model_setting_id = uuid.uuid4()
+    runtime_setting_id = uuid.uuid4()
+    session = _make_session(session_id, user_id)
+    service = SessionService(
+        session_repo=FakeSessionRepo(session),
+        event_repo=SimpleNamespace(),
+        run_task_service=SimpleNamespace(),
+        file_store=SimpleNamespace(),
+        file_service=SimpleNamespace(),
+        sandbox_repo=SimpleNamespace(),
+        cache=FakeCache(),
+        config=SimpleNamespace(
+            workspace_path="/tmp/workspace",
+            sandbox=SimpleNamespace(provider="docker", e2b_api_key=None),
+        ),
+    )
+    db = SimpleNamespace()
+
+    async def _flush():
+        return None
+
+    db.flush = _flush
+
+    model_config = ModelConfig(
+        id=model_setting_id,
+        model_id="gpt-5.4",
+        provider=Provider.OPENAI,
+        provider_connection_id=uuid.uuid4(),
+        runtime_product="codex",
+        config_type=ConfigType.USER,
+        credential_source=CredentialSource.PROVIDER_OAUTH,
+    )
+    model_setting_service = SimpleNamespace(
+        resolve_model_config=AsyncMock(return_value=model_config),
+    )
+    mcp_setting_service = SimpleNamespace(
+        resolve_runtime_setting_for_run=AsyncMock(
+            return_value=SimpleNamespace(id=runtime_setting_id)
+        ),
+    )
+
+    with patch("ii_agent.sessions.service.sa_inspect") as mock_inspect:
+        mock_state = MagicMock()
+        mock_state.unloaded = {"project"}
+        mock_inspect.return_value = mock_state
+
+        result = await service.validate_and_prepare_for_run(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+            source="user",
+            model_id=str(model_setting_id),
+            text="Use Codex for this run",
+            agent_type="codex",
+            credit_service=FakeCreditService(),
+            model_setting_service=model_setting_service,
+            mcp_setting_service=mcp_setting_service,
+        )
+
+    assert result.is_valid is True
+    assert session.mcp_setting_id == runtime_setting_id
+    mcp_setting_service.resolve_runtime_setting_for_run.assert_awaited_once()

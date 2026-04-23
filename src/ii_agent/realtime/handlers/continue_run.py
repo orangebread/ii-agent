@@ -152,6 +152,14 @@ class ContinueRunHandler(BaseCommandHandler[ContinueRunContent]):
                 getattr(run_task, "data", None) if run_task is not None else None
             )
 
+            if getattr(llm_config, "runtime_product", None) == "codex":
+                await self._send_error_event(
+                    session_info.id,
+                    error_code=ErrorCode.EXECUTION_ERROR,
+                    message="Codex runtime sessions do not support continue_run yet.",
+                )
+                return
+
             # Create agent with same configuration (matches query handler pattern)
             agent = await agent_factory.create_agent(
                 user_id=str(session_info.user_id),

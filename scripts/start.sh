@@ -26,6 +26,7 @@ AUTO_HEAL=1
 XVFB_PID=""
 BACKEND_PID=""
 FRONTEND_PID=""
+SERVICES_STARTED=0
 SERVER_ARGS=()
 SERVER_HOST="0.0.0.0"
 SERVER_PORT="${PORT:-8000}"
@@ -52,6 +53,7 @@ RUNTIME_STORAGE_GCS_BUCKET=""
 RUNTIME_STORAGE_GCS_PROJECT=""
 RUNTIME_MODEL_CONFIGS_PRESENT=0
 RUNTIME_SANDBOX_PROVIDER=""
+RUNTIME_SANDBOX_DOCKER_IMAGE=""
 RUNTIME_SANDBOX_READY=1
 
 log() {
@@ -101,6 +103,9 @@ cleanup() {
   fi
   if [[ -n "$XVFB_PID" ]] && kill -0 "$XVFB_PID" >/dev/null 2>&1; then
     kill "$XVFB_PID" >/dev/null 2>&1 || true
+  fi
+  if [[ $SERVICES_STARTED -eq 1 ]]; then
+    cleanup_local_sandbox_containers "shutdown"
   fi
 }
 
@@ -375,6 +380,71 @@ load_runtime_facts() {
 
 docker_is_ready() {
   command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+}
+
+resolve_sandbox_runtime_binary() {
+  if command -v podman >/dev/null 2>&1; then
+    printf 'podman\n'
+    return 0
+  fi
+  if command -v docker >/dev/null 2>&1; then
+    printf 'docker\n'
+    return 0
+  fi
+  return 1
+}
+
+collect_local_sandbox_containers() {
+  local runtime_binary="$1"
+
+  {
+    "$runtime_binary" ps -aq \
+      --filter "label=ii_agent.managed=true" \
+      --filter "label=ii_agent.role=sandbox" \
+      --filter "label=ii_agent.project_name=$COMPOSE_PROJECT_NAME" 2>/dev/null || true
+
+    if [[ -n "$RUNTIME_SANDBOX_DOCKER_IMAGE" ]]; then
+      "$runtime_binary" ps -aq \
+        --filter "ancestor=$RUNTIME_SANDBOX_DOCKER_IMAGE" \
+        --filter "name=ii-agent-sandbox-" 2>/dev/null || true
+    fi
+  } | awk 'NF && !seen[$0]++'
+}
+
+cleanup_local_sandbox_containers() {
+  local phase="$1"
+
+  if [[ "$RUNTIME_SANDBOX_PROVIDER" != "docker" ]]; then
+    return 0
+  fi
+
+  local runtime_binary
+  runtime_binary=$(resolve_sandbox_runtime_binary) || return 0
+
+  local container_output
+  container_output=$(collect_local_sandbox_containers "$runtime_binary")
+  if [[ -z "$container_output" ]]; then
+    return 0
+  fi
+
+  local container_ids=()
+  local container_id
+  while IFS= read -r container_id; do
+    if [[ -n "$container_id" ]]; then
+      container_ids+=("$container_id")
+    fi
+  done <<< "$container_output"
+
+  if [[ ${#container_ids[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  info "Removing ${#container_ids[@]} local sandbox container(s) during $phase"
+  if "$runtime_binary" rm -f "${container_ids[@]}" >/dev/null 2>&1; then
+    ok "Removed ${#container_ids[@]} local sandbox container(s) for project $COMPOSE_PROJECT_NAME"
+  else
+    warn "Failed to remove local sandbox containers for project $COMPOSE_PROJECT_NAME"
+  fi
 }
 
 start_local_infra() {
@@ -792,6 +862,7 @@ main() {
 
   parse_args "$@" || return 1
   export II_AGENT_ENV_FILE="$ENV_FILE"
+  export DEV_PROJECT_NAME="$COMPOSE_PROJECT_NAME"
 
   info "Starting II-Agent preflight validation"
   ensure_env_file || true
@@ -832,6 +903,8 @@ main() {
     return 0
   fi
 
+  cleanup_local_sandbox_containers "startup"
+
   log ""
   info "All blocking validations passed; starting local development services"
   print_runtime_services
@@ -840,6 +913,7 @@ main() {
 
   start_backend_process
   start_frontend_process
+  SERVICES_STARTED=1
 
   local backend_display_host
   backend_display_host=$(display_host "$SERVER_HOST")

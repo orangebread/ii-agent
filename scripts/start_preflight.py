@@ -61,6 +61,7 @@ def emit_facts() -> int:
         "RUNTIME_STORAGE_GCS_PROJECT": settings.storage.project_id or "",
         "RUNTIME_MODEL_CONFIGS_PRESENT": "1" if settings.model_configs else "0",
         "RUNTIME_SANDBOX_PROVIDER": settings.sandbox.provider,
+        "RUNTIME_SANDBOX_DOCKER_IMAGE": settings.sandbox.docker_image,
         "RUNTIME_SANDBOX_READY": "0"
         if settings.sandbox.provider == "e2b" and not settings.sandbox.e2b_api_key
         else "1",

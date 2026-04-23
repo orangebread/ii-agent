@@ -1,3 +1,4 @@
+import json
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
@@ -13,6 +14,10 @@ from ii_agent.agents.sandboxes.shell import (
     ShellResult,
     ShellSessionRecord,
     ShellSessionState,
+)
+from ii_agent.agents.sandboxes.exceptions import (
+    SandboxNotFoundException,
+    SandboxOperationError as SandboxProviderOperationError,
 )
 from ii_agent.agents.sandboxes.service import SandboxService
 from ii_agent.agents.sandboxes.types import SandboxProviderType, SandboxStatus
@@ -194,6 +199,109 @@ async def test_get_sandbox_for_session_propagates_provider_connection_errors(
 
 
 @pytest.mark.asyncio
+async def test_get_sandbox_for_session_recreates_missing_docker_provider_after_local_cleanup(
+    settings_factory, monkeypatch
+):
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        provider=SandboxProviderType.DOCKER,
+        provider_sandbox_id="docker-old",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        provider_data={},
+    )
+    expected_sandbox = SimpleNamespace(provider_sandbox_id="docker-new")
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({session_id: record}),
+        session_repo=FakeSessionRepo(
+            {
+                session_id: SimpleNamespace(id=session_id, user_id=user_id),
+            }
+        ),
+        config=settings_factory(sandbox={"provider": "docker"}),
+    )
+    monkeypatch.setattr(
+        service,
+        "_connect_provider",
+        AsyncMock(side_effect=SandboxNotFoundException("docker-old")),
+    )
+    init_sandbox = AsyncMock(return_value=expected_sandbox)
+    monkeypatch.setattr(service, "init_sandbox", init_sandbox)
+
+    sandbox = await service.get_sandbox_for_session(None, session_id)
+
+    assert sandbox is expected_sandbox
+    init_sandbox.assert_awaited_once_with(
+        None,
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_provider_routes_docker_records_to_docker_provider(
+    settings_factory, monkeypatch
+):
+    session_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        provider=SandboxProviderType.DOCKER,
+        provider_sandbox_id=None,
+    )
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(sandbox={"provider": "docker"}),
+    )
+    expected = SimpleNamespace(provider_sandbox_id="docker-123")
+    create = AsyncMock(return_value=expected)
+    monkeypatch.setattr("ii_agent.agents.sandboxes.service.DockerSandbox.create", create)
+
+    result = await service._create_provider(record, metadata={"tool": "codex"})
+
+    assert result is expected
+    create.assert_awaited_once_with(
+        sandbox_id=str(record.id),
+        session_id=str(record.session_id),
+        metadata={"tool": "codex"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_provider_routes_docker_records_to_docker_provider(
+    settings_factory, monkeypatch
+):
+    session_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        provider=SandboxProviderType.DOCKER,
+        provider_sandbox_id="docker-123",
+    )
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(sandbox={"provider": "docker"}),
+    )
+    expected = SimpleNamespace(provider_sandbox_id="docker-123")
+    connect = AsyncMock(return_value=expected)
+    monkeypatch.setattr("ii_agent.agents.sandboxes.service.DockerSandbox.connect", connect)
+
+    result = await service._connect_provider(record)
+
+    assert result is expected
+    connect.assert_awaited_once_with(
+        sandbox_id=str(record.id),
+        session_id=str(record.session_id),
+        provider_sandbox_id="docker-123",
+    )
+
+
+@pytest.mark.asyncio
 async def test_get_sandbox_by_session_id_aliases_existing_lookup(settings_factory, monkeypatch):
     session_id = uuid.uuid4()
     expected_sandbox = SimpleNamespace(provider_sandbox_id="sbx-1")
@@ -304,7 +412,13 @@ async def test_register_user_mcp_servers_registers_selected_codex(monkeypatch, s
     )
     monkeypatch.setattr(
         "ii_agent.settings.provider_connections.service.ProviderConnectionService.get_credentials_dict",
-        lambda self, connection: {"tokens": {"refresh_token": "refresh-123"}},
+        lambda self, connection: {
+            "tokens": {
+                "id_token": "id-123",
+                "access_token": "access-123",
+                "refresh_token": "refresh-123",
+            }
+        },
     )
     monkeypatch.setattr(service, "_get_composio_mcp_servers", AsyncMock(return_value=None))
     sys.modules["ii_server.mcp.client"] = types.SimpleNamespace(MCPClient=_FakeMCPClient)
@@ -360,6 +474,72 @@ async def test_register_user_mcp_servers_registers_selected_claude(monkeypatch, 
     client = _FakeMCPClient.instances[-1]
     client.register_codex.assert_not_awaited()
     client.register_custom_mcp.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_configure_mcp_still_materializes_codex_auth_when_port_exposure_unavailable(
+    monkeypatch, settings_factory
+):
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(sandbox={"user": "/home/user"}),
+    )
+    selected_runtime = SimpleNamespace(
+        provider_connection_id=uuid.uuid4(),
+        mcp_metadata={"tool_type": "codex"},
+        mcp_config={"mcpServers": {"codex-as-mcp": {"command": "uvx"}}},
+    )
+    sandbox = SimpleNamespace(
+        session_id=str(session_id),
+        sandbox_id="sandbox-1",
+        expose_port=AsyncMock(
+            side_effect=SandboxProviderOperationError(
+                "expose_port",
+                "Port exposure is not supported by the Docker sandbox provider yet.",
+            )
+        ),
+        get_mcp_client=MagicMock(),
+        write_file=AsyncMock(),
+    )
+
+    monkeypatch.setattr(
+        "ii_agent.settings.mcp.service.MCPSettingService.list_mcp_settings",
+        AsyncMock(return_value=SimpleNamespace(settings=[])),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.mcp.service.MCPSettingService.resolve_effective_runtime_setting",
+        AsyncMock(return_value=selected_runtime),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.provider_connections.service.ProviderConnectionService.get_connection_model",
+        AsyncMock(return_value=SimpleNamespace(id=selected_runtime.provider_connection_id)),
+    )
+    monkeypatch.setattr(
+        "ii_agent.settings.provider_connections.service.ProviderConnectionService.get_credentials_dict",
+        lambda self, connection: {
+            "tokens": {
+                "id_token": "id-123",
+                "access_token": "access-123",
+                "refresh_token": "refresh-123",
+            }
+        },
+    )
+    monkeypatch.setattr(service, "_get_composio_mcp_servers", AsyncMock(return_value=None))
+
+    await service._configure_mcp(sandbox, user_id, None)
+
+    sandbox.write_file.assert_awaited_once()
+    assert sandbox.write_file.await_args.args[0] == "/home/user/.codex/auth.json"
+    auth_json = json.loads(sandbox.write_file.await_args.args[1])
+    assert auth_json["auth_mode"] == "chatgpt"
+    assert auth_json["OPENAI_API_KEY"] is None
+    assert auth_json["tokens"]["id_token"] == "id-123"
+    assert auth_json["tokens"]["access_token"] == "access-123"
+    assert auth_json["tokens"]["refresh_token"] == "refresh-123"
+    sandbox.get_mcp_client.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -532,6 +712,62 @@ async def test_init_sandbox_reconciles_runtime_secret_state(settings_factory, mo
     persisted_provider_data = sandbox_repo.update_provider_info.await_args.kwargs["provider_data"]
     assert persisted_provider_data["ii_agent_secret_sync"]["project_path"] == "/workspace/app"
     assert "revision" in persisted_provider_data["ii_agent_secret_sync"]
+
+
+@pytest.mark.asyncio
+async def test_init_sandbox_recreates_missing_docker_provider_after_local_cleanup(
+    settings_factory, monkeypatch
+):
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    sandbox_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=sandbox_id,
+        session_id=session_id,
+        provider=SandboxProviderType.DOCKER,
+        provider_sandbox_id="docker-old",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        provider_data={"pty_sessions": {"build": {"pid": 123}}},
+    )
+    sandbox_mgr = SimpleNamespace(
+        sandbox_id=str(sandbox_id),
+        session_id=str(session_id),
+        provider_sandbox_id="docker-new",
+        status=SandboxStatus.RUNNING,
+        expired_at=None,
+        metadata={"ii_sandbox_id": str(sandbox_id), "runtime": "docker"},
+    )
+    sandbox_repo = AsyncMock()
+    sandbox_repo.update_provider_info = AsyncMock()
+    service = SandboxService(
+        sandbox_repo=sandbox_repo,
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(sandbox={"provider": "docker"}),
+    )
+    monkeypatch.setattr(service, "_resolve_sandbox_record", AsyncMock(return_value=record))
+    monkeypatch.setattr(
+        service,
+        "_connect_provider",
+        AsyncMock(side_effect=SandboxNotFoundException("docker-old")),
+    )
+    monkeypatch.setattr(service, "_create_provider", AsyncMock(return_value=sandbox_mgr))
+    monkeypatch.setattr(service, "_configure_mcp", AsyncMock())
+
+    result = await service.init_sandbox(
+        object(),
+        session_id=session_id,
+        user_id=user_id,
+    )
+
+    assert result is sandbox_mgr
+    service._create_provider.assert_awaited_once_with(record, None)
+    service._configure_mcp.assert_awaited_once()
+    persisted_provider_data = sandbox_repo.update_provider_info.await_args.kwargs["provider_data"]
+    assert persisted_provider_data["pty_sessions"] == {"build": {"pid": 123}}
+    assert (
+        sandbox_repo.update_provider_info.await_args.kwargs["provider_sandbox_id"] == "docker-new"
+    )
 
 
 @pytest.mark.asyncio
