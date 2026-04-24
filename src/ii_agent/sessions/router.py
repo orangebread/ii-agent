@@ -11,6 +11,8 @@ from ii_agent.core.exceptions import InternalError
 from ii_agent.sessions.dependencies import RunTaskServiceDep
 from ii_agent.chat.api.dependencies import ChatMessageRepositoryDep
 from ii_agent.files.dependencies import FileServiceDep
+from ii_agent.core.runtime_capabilities import build_runtime_profile
+from ii_agent.settings.llm.dependencies import ModelSettingServiceDep
 from ii_agent.settings.mcp.dependencies import MCPSettingServiceDep
 from ii_agent.sessions.dependencies import SessionForkServiceDep, SessionServiceDep
 from ii_agent.sessions.exceptions import SessionNotFoundError
@@ -88,6 +90,42 @@ def _inject_signed_urls(
                 entry["signed_url"] = url_map[fid]
 
 
+async def _hydrate_runtime_profile(
+    *,
+    db: DBSession,
+    session_data: SessionInfo,
+    model_setting_service: ModelSettingServiceDep,
+) -> SessionInfo:
+    """Attach additive runtime profile fields for reload-safe session bootstrap."""
+    if not session_data.model_setting_id:
+        return session_data
+
+    try:
+        llm_config = await model_setting_service.resolve_config_by_setting_id(
+            db,
+            setting_id=session_data.model_setting_id,
+            user_id=session_data.user_id,
+        )
+    except Exception:
+        logger.debug(
+            "Failed to resolve runtime profile for session %s",
+            session_data.id,
+            exc_info=True,
+        )
+        return session_data
+
+    runtime_profile = build_runtime_profile(
+        model_config=llm_config,
+        mcp_setting_id=session_data.mcp_setting_id,
+    )
+    return session_data.model_copy(
+        update={
+            "runtime_profile": runtime_profile,
+            "runtime_capabilities": runtime_profile.capabilities,
+        }
+    )
+
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
@@ -115,6 +153,7 @@ async def get_session(
     db: DBSession,
     current_user: CurrentUser,
     session_service: SessionServiceDep,
+    model_setting_service: ModelSettingServiceDep,
 ) -> SessionInfo:
     """Get detailed information for a specific session."""
     session_data = await session_service.get_session_details(db, session_id, current_user.id)
@@ -122,7 +161,11 @@ async def get_session(
     if not session_data:
         raise SessionNotFoundError(f"Session {session_id} not found or access denied")
 
-    return session_data
+    return await _hydrate_runtime_profile(
+        db=db,
+        session_data=session_data,
+        model_setting_service=model_setting_service,
+    )
 
 
 @router.get("", response_model=SessionResponse)
@@ -347,6 +390,7 @@ async def get_public_session(
     session_id: uuid.UUID,
     db: DBSession,
     session_service: SessionServiceDep,
+    model_setting_service: ModelSettingServiceDep,
 ) -> SessionInfo:
     """Get detailed information for a public session without authentication."""
     session_data = await session_service.get_public_session_details(db, session_id)
@@ -354,7 +398,11 @@ async def get_public_session(
     if not session_data:
         raise SessionNotFoundError(f"Session {session_id} not found or not public")
 
-    return session_data
+    return await _hydrate_runtime_profile(
+        db=db,
+        session_data=session_data,
+        model_setting_service=model_setting_service,
+    )
 
 
 @public_router.get("/{session_id}/events", response_model=EventResponse)

@@ -198,32 +198,11 @@ const QuestionInput = ({
         }
     }, [availableModels, dispatch, selectedFeature, selectedModel])
 
-    const selectedModelConfig = useMemo(
-        () => availableModels.find((model) => model.id === selectedModel),
-        [availableModels, selectedModel]
-    )
-
-    useEffect(() => {
-        if (
-            selectedModelConfig?.runtime_product === 'codex' &&
-            buildMode === BUILD_MODE.PLAN
-        ) {
-            dispatch(setBuildMode(BUILD_MODE.BUILD))
-        }
-    }, [selectedModelConfig?.runtime_product, buildMode, dispatch])
-
     const availableBuildModes = useMemo(() => {
-        const baseModes =
-            location.pathname === '/'
-                ? LANDING_AVAILABLE_MODES
-                : [BUILD_MODE.BUILD, BUILD_MODE.DESIGN, BUILD_MODE.PLAN]
-
-        if (selectedModelConfig?.runtime_product === 'codex') {
-            return baseModes.filter((mode) => mode !== BUILD_MODE.PLAN)
-        }
-
-        return baseModes
-    }, [location.pathname, selectedModelConfig?.runtime_product])
+        return location.pathname === '/'
+            ? LANDING_AVAILABLE_MODES
+            : [BUILD_MODE.BUILD, BUILD_MODE.DESIGN, BUILD_MODE.PLAN]
+    }, [location.pathname])
 
     const {
         chatMediaPreference,

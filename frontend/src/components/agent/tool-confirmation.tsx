@@ -29,11 +29,15 @@ export function ToolConfirmation({ confirmation }: ToolConfirmationProps) {
         requirement?.tool_execution?.tool_name ||
         t('agent.toolConfirmation.unknownTool')
     const toolArgs = requirement?.tool_execution?.tool_args || {}
+    const userInputSchema = requirement?.user_input_schema || []
+    const requiresUserInput = Boolean(requirement?.needs_user_input)
+    const isCodexApproval = toolName.startsWith('codex_')
 
-    const handleConfirm = (
-        confirmed: boolean,
+    const handleContinue = (payload: {
+        confirmed?: boolean
+        decision?: 'approve_once' | 'approve_session' | 'reject' | 'cancel'
         userInput?: Record<string, string>
-    ) => {
+    }) => {
         if (isResponding || !isInteractive) return
 
         setIsResponding(true)
@@ -46,10 +50,26 @@ export function ToolConfirmation({ confirmation }: ToolConfirmationProps) {
             content: {
                 command: CommandType.CONTINUE_RUN,
                 run_id: confirmation.run_id,
-                confirmed: confirmed,
-                ...(userInput ? { user_input: userInput } : {})
+                ...(payload.decision
+                    ? { decision: payload.decision }
+                    : { confirmed: Boolean(payload.confirmed) }),
+                ...(payload.userInput ? { user_input: payload.userInput } : {})
             }
         })
+    }
+
+    const handleConfirm = (
+        confirmed: boolean,
+        userInput?: Record<string, string>
+    ) => {
+        handleContinue({ confirmed, userInput })
+    }
+
+    const handleDecision = (
+        decision: 'approve_once' | 'approve_session' | 'reject' | 'cancel',
+        userInput?: Record<string, string>
+    ) => {
+        handleContinue({ decision, userInput })
     }
 
     // Show processing state when responding
@@ -60,6 +80,18 @@ export function ToolConfirmation({ confirmation }: ToolConfirmationProps) {
                     {t('agent.toolConfirmation.processingResponse')}
                 </div>
             </div>
+        )
+    }
+
+    if (requiresUserInput && userInputSchema.length > 0) {
+        return (
+            <GenericUserInputUI
+                fields={userInputSchema}
+                toolArgs={toolArgs}
+                disabled={!isInteractive}
+                onSubmit={(values) => handleConfirm(true, values)}
+                onCancel={() => handleConfirm(false)}
+            />
         )
     }
 
@@ -135,17 +167,46 @@ export function ToolConfirmation({ confirmation }: ToolConfirmationProps) {
                         )}
                     </div>
 
-                    <div className="flex gap-3">
+                    <div className="flex flex-wrap gap-3">
+                        {isCodexApproval ? (
+                            <>
+                                <Button
+                                    onClick={() =>
+                                        handleDecision('approve_once')
+                                    }
+                                    className="flex-1 min-w-[140px] bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2"
+                                    disabled={isResponding || !isInteractive}
+                                >
+                                    <Check className="size-4" />
+                                    Approve once
+                                </Button>
+                                <Button
+                                    onClick={() =>
+                                        handleDecision('approve_session')
+                                    }
+                                    className="flex-1 min-w-[160px] bg-emerald-700 hover:bg-emerald-800 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2"
+                                    disabled={isResponding || !isInteractive}
+                                >
+                                    <Check className="size-4" />
+                                    Approve session
+                                </Button>
+                            </>
+                        ) : (
+                            <Button
+                                onClick={() => handleConfirm(true)}
+                                className="flex-1 bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2"
+                                disabled={isResponding || !isInteractive}
+                            >
+                                <Check className="size-4" />
+                                {t('agent.toolConfirmation.yesContinue')}
+                            </Button>
+                        )}
                         <Button
-                            onClick={() => handleConfirm(true)}
-                            className="flex-1 bg-green-600 hover:bg-green-700 text-white font-medium py-2 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2"
-                            disabled={isResponding || !isInteractive}
-                        >
-                            <Check className="size-4" />
-                            {t('agent.toolConfirmation.yesContinue')}
-                        </Button>
-                        <Button
-                            onClick={() => handleConfirm(false)}
+                            onClick={() =>
+                                isCodexApproval
+                                    ? handleDecision('reject')
+                                    : handleConfirm(false)
+                            }
                             variant="outline"
                             className="flex-1 border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 font-medium py-2 px-4 rounded-lg transition-colors duration-200 flex items-center justify-center gap-2"
                             disabled={isResponding || !isInteractive}
@@ -157,6 +218,180 @@ export function ToolConfirmation({ confirmation }: ToolConfirmationProps) {
                 </div>
             )
     }
+}
+
+// --- Generic user input UI ---
+
+interface GenericUserInputField {
+    name: string
+    field_type: string
+    description?: string
+    value?: unknown
+}
+
+interface GenericQuestionOption {
+    label: string
+    description?: string
+}
+
+interface GenericQuestion {
+    id: string
+    header?: string
+    question?: string
+    isOther?: boolean
+    options?: GenericQuestionOption[]
+}
+
+interface GenericUserInputUIProps {
+    fields: GenericUserInputField[]
+    toolArgs: Record<string, unknown>
+    disabled?: boolean
+    onSubmit: (values: Record<string, string>) => void
+    onCancel: () => void
+}
+
+function GenericUserInputUI({
+    fields,
+    toolArgs,
+    disabled = false,
+    onSubmit,
+    onCancel
+}: GenericUserInputUIProps) {
+    const { t } = useTranslation()
+    const questions = Array.isArray(toolArgs.questions)
+        ? (toolArgs.questions as GenericQuestion[])
+        : []
+    const [values, setValues] = useState<Record<string, string>>(() =>
+        Object.fromEntries(
+            fields.map((field) => [
+                field.name,
+                typeof field.value === 'string' ? field.value : ''
+            ])
+        )
+    )
+
+    const allRequiredAnswered = fields.every((field) =>
+        values[field.name]?.trim()
+    )
+
+    const updateValue = (name: string, value: string) => {
+        setValues((current) => ({ ...current, [name]: value }))
+    }
+
+    return (
+        <div className="mt-3 w-full max-w-2xl rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1e1e1e] p-4 shadow-sm">
+            {disabled && (
+                <p className="mb-3 text-xs text-gray-500 dark:text-gray-400">
+                    {t('agent.toolConfirmation.inactive')}
+                </p>
+            )}
+
+            <div className="space-y-4">
+                {fields.map((field) => {
+                    const question = questions.find((q) => q.id === field.name)
+                    const label =
+                        question?.question ||
+                        field.description ||
+                        question?.header ||
+                        field.name
+                    const options = question?.options || []
+
+                    return (
+                        <div key={field.name} className="space-y-2">
+                            <p className="text-sm font-medium text-gray-900 dark:text-gray-100">
+                                {label}
+                            </p>
+
+                            {options.length > 0 ? (
+                                <div className="flex flex-col gap-2">
+                                    {options.map((option) => {
+                                        const isSelected =
+                                            values[field.name] === option.label
+                                        return (
+                                            <button
+                                                key={option.label}
+                                                type="button"
+                                                onClick={() =>
+                                                    updateValue(
+                                                        field.name,
+                                                        option.label
+                                                    )
+                                                }
+                                                disabled={disabled}
+                                                className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                                                    isSelected
+                                                        ? 'border-sky-500 bg-sky-50 text-sky-950 dark:bg-sky-950/30 dark:text-sky-100'
+                                                        : 'border-gray-200 bg-gray-50 text-gray-700 hover:bg-gray-100 dark:border-gray-700 dark:bg-[#2d2d2d] dark:text-gray-300'
+                                                }`}
+                                            >
+                                                <span className="block font-medium">
+                                                    {option.label}
+                                                </span>
+                                                {option.description && (
+                                                    <span className="mt-0.5 block text-xs opacity-75">
+                                                        {option.description}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                            ) : (
+                                <input
+                                    value={values[field.name] || ''}
+                                    onChange={(event) =>
+                                        updateValue(
+                                            field.name,
+                                            event.target.value
+                                        )
+                                    }
+                                    disabled={disabled}
+                                    type={
+                                        field.field_type === 'bool'
+                                            ? 'text'
+                                            : 'text'
+                                    }
+                                    className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 outline-none focus:border-sky-500 dark:border-gray-700 dark:bg-[#2d2d2d] dark:text-gray-100"
+                                />
+                            )}
+
+                            {question?.isOther && (
+                                <input
+                                    value={values[field.name] || ''}
+                                    onChange={(event) =>
+                                        updateValue(
+                                            field.name,
+                                            event.target.value
+                                        )
+                                    }
+                                    disabled={disabled}
+                                    placeholder="Other"
+                                    className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-900 outline-none focus:border-sky-500 dark:border-gray-700 dark:bg-[#2d2d2d] dark:text-gray-100"
+                                />
+                            )}
+                        </div>
+                    )
+                })}
+            </div>
+
+            <div className="mt-4 flex items-center gap-3">
+                <Button
+                    onClick={() => onSubmit(values)}
+                    disabled={disabled || !allRequiredAnswered}
+                    className="bg-sky-600 hover:bg-sky-700 text-white font-medium py-2 px-6 rounded-lg transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    {t('common.confirm')}
+                </Button>
+                <button
+                    onClick={onCancel}
+                    disabled={disabled}
+                    className="px-4 py-2 text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
+                >
+                    {t('common.cancel', 'Cancel')}
+                </button>
+            </div>
+        </div>
+    )
 }
 
 // --- AskUserSelect UI ---

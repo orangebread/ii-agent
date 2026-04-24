@@ -72,8 +72,9 @@ class Settings(BaseSettings):
         DATABASE_URL=postgresql+asyncpg://user:pass@localhost/dbname
         REDIS_SESSION_URL=redis://localhost:6379/0
         REDIS_SESSION_ENABLED=true
-        SANDBOX_PROVIDER=e2b
-        SANDBOX_E2B_API_KEY=your-api-key
+        SANDBOX_PROVIDER=daytona
+        SANDBOX_DAYTONA_API_URL=http://localhost:3980/api
+        # or SANDBOX_PROVIDER=e2b with SANDBOX_E2B_API_KEY
         STORAGE_PROVIDER=gcs
         STORAGE_FILE_UPLOAD_BUCKET_NAME=my-bucket
         MOBILE_APPLE_WIDGET_KEY=83545bf919730e51dbfba24e7e8a78d2
@@ -121,6 +122,22 @@ class Settings(BaseSettings):
     dev_auth_bypass_last_name: str = Field(
         default="Developer",
         description="Fallback last name used for local-development auth bypass",
+    )
+
+    codex_app_server_workflows_enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable Codex App Server-backed workflow capabilities. Production still "
+            "requires CODEX_APP_SERVER_SMOKE_VERIFIED=true."
+        ),
+    )
+
+    codex_app_server_smoke_verified: bool = Field(
+        default=False,
+        description=(
+            "Release gate confirming the configured sandbox image/template passed "
+            "Codex App Server protocol smoke tests."
+        ),
     )
 
     # ========== Nested Configuration Sections ==========

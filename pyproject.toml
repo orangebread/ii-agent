@@ -126,6 +126,8 @@ markers = [
     "unit: Unit tests",
     "integration: Integration tests",
     "smoke: Smoke tests",
+    "codex_smoke: Opt-in Codex App Server sandbox contract smoke tests",
+    "sandbox_smoke: Opt-in sandbox provider contract smoke tests",
     "external: Tests that require external services",
     "allowed_skip: Explicitly documented skip allowed in required suites",
 ]

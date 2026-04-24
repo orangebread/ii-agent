@@ -5,14 +5,20 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
+import selectors
 import shlex
+import shutil
 import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 from urllib.parse import urlparse
 
 import asyncpg
+import httpx
 import urllib3
 from dotenv import load_dotenv
 from google.cloud import storage as gcs_storage
@@ -21,6 +27,7 @@ from redis.asyncio import Redis
 
 from ii_agent.core.db.base import _prepare_asyncpg_url
 from ii_agent.core.config.settings import get_settings
+from ii_agent.core.runtime_capabilities import codex_app_server_workflows_enabled
 
 
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -36,6 +43,14 @@ def is_local_host(host: str | None) -> bool:
     return bool(host) and host in LOCAL_HOSTS
 
 
+def summarize_http_error(response: httpx.Response) -> str:
+    content_type = response.headers.get("content-type", "unknown")
+    body = " ".join(response.text.strip().split())
+    if len(body) > 240:
+        body = f"{body[:240]}..."
+    return f"status={response.status_code} content-type={content_type} body={body or '<empty>'}"
+
+
 def emit_facts() -> int:
     settings = get_settings()
     db_url = settings.database.url or ""
@@ -45,6 +60,12 @@ def emit_facts() -> int:
     minio_host = ""
     if settings.storage.provider == "minio":
         minio_host = settings.storage.minio_endpoint.split(":", 1)[0]
+
+    sandbox_ready = "1"
+    if settings.sandbox.provider == "e2b" and not settings.sandbox.e2b_api_key:
+        sandbox_ready = "0"
+    elif settings.sandbox.provider == "daytona" and not settings.sandbox.daytona_api_url:
+        sandbox_ready = "0"
 
     facts = {
         "RUNTIME_ENVIRONMENT": settings.environment,
@@ -62,9 +83,21 @@ def emit_facts() -> int:
         "RUNTIME_MODEL_CONFIGS_PRESENT": "1" if settings.model_configs else "0",
         "RUNTIME_SANDBOX_PROVIDER": settings.sandbox.provider,
         "RUNTIME_SANDBOX_DOCKER_IMAGE": settings.sandbox.docker_image,
-        "RUNTIME_SANDBOX_READY": "0"
-        if settings.sandbox.provider == "e2b" and not settings.sandbox.e2b_api_key
-        else "1",
+        "RUNTIME_SANDBOX_DAYTONA_API_URL": settings.sandbox.daytona_api_url,
+        "RUNTIME_SANDBOX_DAYTONA_API_KEY_PRESENT": "1" if settings.sandbox.daytona_api_key else "0",
+        "RUNTIME_SANDBOX_DAYTONA_DEFAULT_IMAGE": settings.sandbox.daytona_default_image,
+        "RUNTIME_SANDBOX_CODEX_CLI_PACKAGE": (
+            f"@openai/codex@{settings.sandbox.codex_cli_version}"
+            if settings.sandbox.codex_cli_version
+            else "@openai/codex"
+        ),
+        "RUNTIME_SANDBOX_READY": sandbox_ready,
+        "RUNTIME_CODEX_APP_SERVER_WORKFLOWS_ENABLED": "1"
+        if codex_app_server_workflows_enabled(settings)
+        else "0",
+        "RUNTIME_CODEX_APP_SERVER_SMOKE_VERIFIED": "1"
+        if settings.codex_app_server_smoke_verified
+        else "0",
     }
 
     for key, value in facts.items():
@@ -170,6 +203,185 @@ def check_port(host: str, port: int) -> int:
     return 0
 
 
+def _resolve_container_runtime() -> str:
+    for candidate in ("podman", "docker"):
+        resolved = shutil.which(candidate)
+        if resolved:
+            return resolved
+    raise RuntimeError("Neither podman nor docker is installed")
+
+
+def probe_codex_app_server_image() -> int:
+    settings = get_settings()
+    runtime = _resolve_container_runtime()
+    image = settings.sandbox.docker_image
+
+    inspect = subprocess.run(
+        [runtime, "image", "inspect", image],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=30,
+    )
+    if inspect.returncode != 0:
+        raise RuntimeError(
+            f"Sandbox Docker image {image!r} is not present; Codex App Server "
+            "contract cannot be verified until the image is built."
+        )
+
+    script = (
+        "set -euo pipefail; "
+        "command -v codex >/dev/null; "
+        "codex --version >/dev/null; "
+        "codex app-server --help >/dev/null"
+    )
+    probe = subprocess.run(
+        [runtime, "run", "--rm", "--entrypoint", "bash", image, "-lc", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        timeout=60,
+    )
+    if probe.returncode != 0:
+        details = (probe.stderr or probe.stdout or "").strip()
+        raise RuntimeError(
+            "Configured sandbox Docker image does not expose a working "
+            f"`codex app-server` command. Details: {details}"
+        )
+
+    _probe_codex_app_server_initialize(runtime=runtime, image=image)
+    return 0
+
+
+def probe_daytona_api() -> int:
+    settings = get_settings()
+    if settings.sandbox.provider != "daytona":
+        return 0
+
+    api_url = settings.sandbox.daytona_api_url.rstrip("/")
+    if not api_url:
+        raise ValueError("SANDBOX_DAYTONA_API_URL is required for SANDBOX_PROVIDER=daytona")
+
+    headers = {"Accept": "application/json", "X-Daytona-Source": "ii-agent-preflight"}
+    if settings.sandbox.daytona_api_key:
+        headers["Authorization"] = f"Bearer {settings.sandbox.daytona_api_key}"
+
+    response = httpx.get(
+        f"{api_url}/sandbox",
+        headers=headers,
+        timeout=5,
+    )
+    if response.status_code in {401, 403}:
+        raise RuntimeError(
+            "Daytona API is reachable but rejected credentials; set SANDBOX_DAYTONA_API_KEY"
+        )
+    if response.status_code >= 500:
+        raise RuntimeError(
+            f"Daytona API is reachable but unhealthy: {summarize_http_error(response)}"
+        )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Daytona API probe failed: {summarize_http_error(response)}")
+    return 0
+
+
+def probe_daytona_health() -> int:
+    settings = get_settings()
+    if settings.sandbox.provider != "daytona":
+        return 0
+
+    api_url = settings.sandbox.daytona_api_url.rstrip("/")
+    if not api_url:
+        raise ValueError("SANDBOX_DAYTONA_API_URL is required for SANDBOX_PROVIDER=daytona")
+
+    response = httpx.get(
+        f"{api_url}/health",
+        headers={"Accept": "application/json", "X-Daytona-Source": "ii-agent-preflight"},
+        timeout=5,
+    )
+    if response.status_code >= 400:
+        raise RuntimeError(f"Daytona health probe failed: {summarize_http_error(response)}")
+    return 0
+
+
+def _probe_codex_app_server_initialize(*, runtime: str, image: str) -> None:
+    proc = subprocess.Popen(
+        [
+            runtime,
+            "run",
+            "-i",
+            "--rm",
+            "--entrypoint",
+            "codex",
+            image,
+            "app-server",
+            "--listen",
+            "stdio://",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    try:
+        assert proc.stdin is not None
+        assert proc.stdout is not None
+        proc.stdin.write(
+            json.dumps(
+                {
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {
+                            "name": "ii_agent_preflight",
+                            "title": "II Agent Preflight",
+                            "version": "0.1.0",
+                        },
+                        "capabilities": {"experimentalApi": True},
+                    },
+                }
+            )
+            + "\n"
+        )
+        proc.stdin.flush()
+
+        selector = selectors.DefaultSelector()
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                break
+            events = selector.select(timeout=max(0.1, min(1, deadline - time.monotonic())))
+            if not events:
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("id") != 1:
+                continue
+            if "error" in payload:
+                raise RuntimeError(f"Codex app-server initialize failed: {payload['error']}")
+            if not isinstance(payload.get("result"), dict):
+                raise RuntimeError("Codex app-server initialize returned an invalid result")
+            return
+
+        raise RuntimeError("Timed out waiting for Codex app-server initialize response")
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="II-Agent startup preflight helper")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -180,6 +392,9 @@ def parse_args() -> argparse.Namespace:
     subparsers.add_parser("probe-storage")
     subparsers.add_parser("probe-libmagic")
     subparsers.add_parser("probe-app")
+    subparsers.add_parser("probe-codex-app-server-image")
+    subparsers.add_parser("probe-daytona-api")
+    subparsers.add_parser("probe-daytona-health")
 
     port_parser = subparsers.add_parser("check-port")
     port_parser.add_argument("--host", required=True)
@@ -204,6 +419,12 @@ def main() -> int:
         return probe_libmagic()
     if args.command == "probe-app":
         return probe_app()
+    if args.command == "probe-codex-app-server-image":
+        return probe_codex_app_server_image()
+    if args.command == "probe-daytona-api":
+        return probe_daytona_api()
+    if args.command == "probe-daytona-health":
+        return probe_daytona_health()
     if args.command == "check-port":
         return check_port(args.host, args.port)
 
@@ -215,4 +436,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as exc:  # pragma: no cover - operational entrypoint
         print(str(exc), file=sys.stderr)
-        raise
+        raise SystemExit(1) from None

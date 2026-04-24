@@ -37,20 +37,36 @@ class UserQueryHandler(BaseCommandHandler[QueryCommandContent]):
         """Handle query processing by creating ChatSessionContext and running the agent."""
         query_command = content
 
-        is_valid, session_info, llm_config = await self.validate_and_update_session(
-            existing_session, query_command
-        )
-        if not is_valid or not session_info or not llm_config:
+        validation = await self.validate_and_update_session(existing_session, query_command)
+        session_info = validation.session_info
+        llm_config = validation.llm_config
+        if (
+            not validation.is_valid
+            or not session_info
+            or not llm_config
+            or not validation.runtime_profile
+        ):
             return
 
-        await self._handle_query(query_command, session_info, llm_config)
+        await self._handle_query(
+            query_command,
+            session_info,
+            llm_config,
+            runtime_profile=validation.runtime_profile,
+        )
 
     async def _handle_query(
-        self, query_command: QueryCommandContent, session_info: SessionInfo, llm_config: ModelConfig
+        self,
+        query_command: QueryCommandContent,
+        session_info: SessionInfo,
+        llm_config: ModelConfig,
+        *,
+        runtime_profile,
     ) -> None:
         """Handle query processing for v1 API."""
         plan_service = self._container.plan_service
         file_service = self._container.file_service
+        checkpoint_service = self._container.run_checkpoint_service
 
         milestone_context = None
         if query_command.milestone_ids and query_command.plan_context:
@@ -68,6 +84,14 @@ class UserQueryHandler(BaseCommandHandler[QueryCommandContent]):
                     session_id=session_info.id,
                     task_type=TaskType.AGENT_RUN,
                     data=query_command.model_dump(),
+                )
+                await checkpoint_service.write_execution_binding(
+                    db,
+                    task_id=run_task.id,
+                    binding=self.build_execution_binding(
+                        llm_config=llm_config,
+                        runtime_profile=runtime_profile,
+                    ),
                 )
 
                 user_event, _ = await self.create_user_message_event(

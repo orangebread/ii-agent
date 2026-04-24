@@ -85,7 +85,7 @@ src/ii_agent/
 │   ├── runs/               # Agent run task management
 │   ├── events/             # Event handling & logging
 │   ├── prompts/            # System prompts & templates
-│   ├── sandboxes/          # E2B sandbox management
+│   ├── sandboxes/          # Sandbox provider management (E2B, Docker, Daytona)
 │   ├── socket/             # Socket.IO command handlers (query, cancel, plan)
 │   └── subscribers/        # Event subscribers (metrics, database)
 │
@@ -234,7 +234,9 @@ WebSocket (Socket.IO)
 - **Redis optional**: All Redis usage has in-memory fallbacks for single-worker deployments.
 - **Billing via reservations**: All billable work uses reserve -> settle -> release, never direct deductions.
 - **GCS for storage**: File uploads, media, and slides use Google Cloud Storage with signed URLs.
-- **E2B for sandboxes**: Code execution happens in isolated E2B sandbox environments.
+- **Configurable sandbox providers**: Code execution happens in isolated sandbox
+  environments through the selected provider, including E2B, Docker/Podman, or
+  self-hosted Daytona.
 
 ## Where to Look
 

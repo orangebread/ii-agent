@@ -67,6 +67,7 @@ from ii_agent.sessions.title_service import SessionTitleService
 from ii_agent.core.config.session_title import SessionTitleConfig
 from ii_agent.files.service import FileService
 from ii_agent.tasks.service import RunTaskService
+from ii_agent.tasks.checkpoint_service import RunCheckpointService
 from ii_agent.settings.llm.service import ModelSettingService
 from ii_agent.settings.mcp.service import MCPSettingService
 from ii_agent.settings.provider_connections.service import ProviderConnectionService
@@ -136,6 +137,7 @@ class ApplicationContainer:
     session_wishlist_service: SessionWishlistService
     file_service: FileService
     run_task_service: RunTaskService
+    run_checkpoint_service: RunCheckpointService
     model_setting_service: ModelSettingService
     provider_connection_service: ProviderConnectionService
     mcp_setting_service: MCPSettingService
@@ -230,6 +232,7 @@ class ApplicationContainer:
         run_task_svc = RunTaskService(
             task_repo=run_task_repo, log_repo=task_log_repo, cache=tasks_cache, config=cfg
         )
+        run_checkpoint_svc = RunCheckpointService(run_task_service=run_task_svc)
         provider_connection_svc = ProviderConnectionService(repo=provider_connection_repo)
         mcp_setting_svc = MCPSettingService(
             repo=mcp_setting_repo,
@@ -460,6 +463,7 @@ class ApplicationContainer:
             session_wishlist_service=session_wishlist_svc,
             file_service=file_svc,
             run_task_service=run_task_svc,
+            run_checkpoint_service=run_checkpoint_svc,
             model_setting_service=model_setting_svc,
             provider_connection_service=provider_connection_svc,
             mcp_setting_service=mcp_setting_svc,

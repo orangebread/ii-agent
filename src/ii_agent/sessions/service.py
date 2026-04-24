@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, Optional, List
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ii_agent.core.runtime_capabilities import RuntimeProfile, build_runtime_profile
 from ii_agent.tasks.service import RunTaskService
-
 from ii_agent.credits.constants import MINIMUM_REQUIRED_CREDITS
 from ii_agent.realtime.events.models import ApplicationEvent
 from ii_agent.realtime.events.repository import EventRepository
@@ -505,20 +505,28 @@ class SessionService:
         if not session.name and text:
             session.name = text.strip()[:100]
             dirty = True
-        if agent_type is not None and session.agent_type != agent_type:
+        if session.agent_type is None and agent_type is not None:
             session.agent_type = agent_type
             dirty = True
-        if session.model_setting_id != model_config.id:
+        if not session.model_setting_id:
             session.model_setting_id = model_config.id
             dirty = True
-        if runtime_setting is not None and session.mcp_setting_id != runtime_setting.id:
+        if runtime_setting is not None and not session.mcp_setting_id:
             session.mcp_setting_id = runtime_setting.id
             dirty = True
+
+        runtime_profile = build_runtime_profile(
+            model_config=model_config,
+            mcp_setting_id=getattr(runtime_setting, "id", None),
+            settings=self._config,
+        )
 
         if dirty:
             await db.flush()
             await self._evict_session_cache(session_id)
-            session_info = self._build_session_info(session)
+            session_info = self._build_session_info(session, runtime_profile=runtime_profile)
+        else:
+            session_info = self._build_session_info(session, runtime_profile=runtime_profile)
 
         # Credit check
         if not model_config.is_user_model():
@@ -539,6 +547,9 @@ class SessionService:
             is_valid=True,
             session_info=session_info,
             llm_config=model_config,
+            runtime_setting_id=getattr(runtime_setting, "id", None),
+            runtime_profile=runtime_profile,
+            runtime_capabilities=runtime_profile.capabilities,
         )
 
     # ==================== Helpers ====================
@@ -549,6 +560,7 @@ class SessionService:
         *,
         include_project: bool = True,
         api_version: Optional[str] = None,
+        runtime_profile: RuntimeProfile | None = None,
     ) -> SessionInfo:
         """Build a SessionInfo DTO from a Session model."""
         project_id: Optional[uuid.UUID] = None
@@ -577,6 +589,8 @@ class SessionService:
             model_setting_id=session.model_setting_id,
             mcp_setting_id=session.mcp_setting_id,
             session_metadata=session.session_metadata,
+            runtime_profile=runtime_profile,
+            runtime_capabilities=runtime_profile.capabilities if runtime_profile else None,
         )
 
 

@@ -39,6 +39,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM nikolaik/python-nodejs:python3.10-nodejs24-slim
 
+ARG OPENAI_CODEX_CLI_VERSION=0.124.0
+LABEL ii_agent.codex_cli_package="@openai/codex@${OPENAI_CODEX_CLI_VERSION}"
+
 COPY docker/sandbox/.bashrc /root/.bashrc
 COPY docker/sandbox/.bashrc /home/user/.bashrc
 
@@ -84,7 +87,7 @@ RUN curl -fsSL https://code-server.dev/install.sh | sh
 
 # Optimization: Use npm cache mount and install playwright package and system deps as root
 RUN --mount=type=cache,target=/root/.npm \
-  npm install -g agent-browser @intelligent-internet/codex @ast-grep/cli @anthropic-ai/claude-code
+  npm install -g agent-browser @openai/codex@${OPENAI_CODEX_CLI_VERSION} @ast-grep/cli @anthropic-ai/claude-code
 
 RUN --mount=type=cache,target=/root/.npm \
   npm install -g vercel

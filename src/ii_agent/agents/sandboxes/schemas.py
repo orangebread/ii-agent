@@ -309,4 +309,4 @@ def is_binary_file_path(file_path: str) -> bool:
     return ext in BINARY_EXTENSIONS
 
 
-SandboxProvider = Literal["e2b", "docker"]
+SandboxProvider = Literal["e2b", "docker", "daytona"]

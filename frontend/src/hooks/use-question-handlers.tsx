@@ -331,7 +331,6 @@ export function useQuestionHandlers() {
         }
 
         const supportsPlanWorkflow =
-            selectedModel?.runtime_product !== 'codex' &&
             (selectedFeature === AGENT_TYPE.GENERAL ||
                 selectedFeature === AGENT_TYPE.WEBSITE_BUILD ||
                 selectedFeature === AGENT_TYPE.SLIDE ||

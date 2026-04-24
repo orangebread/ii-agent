@@ -1,10 +1,12 @@
 """Pydantic schemas (DTOs) for sessions domain."""
 
 from enum import StrEnum
+from typing import Any, Dict, List, Literal, Optional
 from uuid import UUID
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Optional, Dict, Any, List, Literal
 
+from pydantic import BaseModel, ConfigDict, Field
+
+from ii_agent.core.runtime_capabilities import RuntimeCapabilities, RuntimeProfile
 from ii_agent.sessions.types import AppKind, SessionState
 from ii_agent.settings.llm.schemas import ModelConfig
 
@@ -52,6 +54,8 @@ class SessionInfo(BaseModel):
     model_setting_id: Optional[UUID] = None
     mcp_setting_id: Optional[UUID] = None
     session_metadata: Optional[Dict[str, Any]] = None
+    runtime_profile: RuntimeProfile | None = None
+    runtime_capabilities: RuntimeCapabilities | None = None
 
 
 class ValidatedSessionResult(BaseModel):
@@ -62,6 +66,9 @@ class ValidatedSessionResult(BaseModel):
     is_valid: bool
     session_info: Optional[SessionInfo] = None
     llm_config: Optional[ModelConfig] = None
+    runtime_setting_id: Optional[UUID] = None
+    runtime_profile: RuntimeProfile | None = None
+    runtime_capabilities: RuntimeCapabilities | None = None
     error_code: Optional[str] = None
 
 

@@ -61,31 +61,51 @@ class PlanHandler(BaseCommandHandler[PlanCommandContent]):
         query_command = content
 
         # Use shared validation from base class
-        is_valid, session_info, llm_config = await self.validate_and_update_session(
-            existing_session, query_command
-        )
+        validation = await self.validate_and_update_session(existing_session, query_command)
+        session_info = validation.session_info
+        llm_config = validation.llm_config
 
-        if not is_valid or not session_info or not llm_config:
+        if (
+            not validation.is_valid
+            or not session_info
+            or not llm_config
+            or not validation.runtime_profile
+        ):
             return
 
-        if getattr(llm_config, "runtime_product", None) == "codex":
+        runtime_capabilities = (
+            validation.runtime_capabilities or validation.runtime_profile.capabilities
+        )
+        if not runtime_capabilities.supports_platform_plan:
             await self._send_error_event(
                 session_info.id,
-                message="Plan mode is not supported for Codex runtime sessions yet.",
+                message="Plan mode is not supported for this runtime.",
             )
             return
 
-        await self._handle_plan(query_command, session_info, llm_config)
+        await self._handle_plan(
+            query_command,
+            session_info,
+            llm_config,
+            runtime_profile=validation.runtime_profile,
+        )
 
     async def _handle_plan(
         self,
         query_command: PlanCommandContent,
         session_info: SessionInfo,
         llm_config: ModelConfig,
+        *,
+        runtime_profile,
     ) -> None:
         """Handle plan mode processing."""
         # Claim task
-        running_task = await self._claim_task(session_info, query_command)
+        running_task = await self._claim_task(
+            session_info,
+            query_command,
+            llm_config=llm_config,
+            runtime_profile=runtime_profile,
+        )
         if not running_task:
             return
 
@@ -139,10 +159,14 @@ class PlanHandler(BaseCommandHandler[PlanCommandContent]):
         self,
         session_info: SessionInfo,
         query_command: PlanCommandContent,
+        *,
+        llm_config: ModelConfig,
+        runtime_profile,
     ) -> RunTaskResponse | None:
         """Create user message event and claim a run task."""
         container = self._container
         svc = container.run_task_service
+        checkpoint_service = container.run_checkpoint_service
 
         async with get_db_session_local() as db:
             existing_task = await svc.find_active_by_session(db, session_info.id)
@@ -171,6 +195,7 @@ class PlanHandler(BaseCommandHandler[PlanCommandContent]):
                     db,
                     session_id=session_info.id,
                     task_type=TaskType.AGENT_RUN,
+                    data=query_command.model_dump(),
                 )
             except TaskConflictException:
                 logger.warning(
@@ -183,6 +208,15 @@ class PlanHandler(BaseCommandHandler[PlanCommandContent]):
                     error_type="duplicate_task",
                 )
                 return None
+
+            await checkpoint_service.write_execution_binding(
+                db,
+                task_id=running_task.id,
+                binding=self.build_execution_binding(
+                    llm_config=llm_config,
+                    runtime_profile=runtime_profile,
+                ),
+            )
 
             user_event.run_id = running_task.id
             await db.commit()

@@ -6,9 +6,11 @@ Key components:
 - Sandbox: Abstract interface for sandbox providers
 - SandboxService: Orchestrates DB persistence + provider lifecycle
 - E2BSandbox: E2B cloud sandbox provider implementation
+- DaytonaSandbox: Daytona sandbox provider implementation
 """
 
 from ii_agent.agents.sandboxes.base import Sandbox
+from ii_agent.agents.sandboxes.daytona import DaytonaSandbox
 from ii_agent.agents.sandboxes.docker import DockerSandbox
 from ii_agent.agents.sandboxes.media_uploader import upload_media_to_sandbox
 from ii_agent.agents.sandboxes.e2b import E2BSandbox
@@ -34,6 +36,7 @@ __all__ = [
     # Provider implementations
     "E2BSandbox",
     "DockerSandbox",
+    "DaytonaSandbox",
     # ORM
     "AgentSandbox",
     # Repository

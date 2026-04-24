@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ii_agent.agents.sandboxes.base import Sandbox
+from ii_agent.agents.sandboxes.daytona import DaytonaSandbox
 from ii_agent.agents.sandboxes.docker import DockerSandbox
 from ii_agent.agents.sandboxes.e2b import E2BSandbox
 from ii_agent.agents.sandboxes.exceptions import SandboxCreationError, SandboxNotFoundException
@@ -645,6 +646,8 @@ class SandboxService:
             return SandboxProviderType.E2B
         if provider == "docker":
             return SandboxProviderType.DOCKER
+        if provider == "daytona":
+            return SandboxProviderType.DAYTONA
         raise SandboxCreationError(f"Unsupported sandbox provider: {provider}")
 
     async def _create_provider(
@@ -665,6 +668,12 @@ class SandboxService:
                 session_id=str(record.session_id),
                 metadata=metadata,
             )
+        if record.provider == SandboxProviderType.DAYTONA:
+            return await DaytonaSandbox.create(
+                sandbox_id=str(record.id),
+                session_id=str(record.session_id),
+                metadata=metadata,
+            )
         raise SandboxCreationError(f"Unsupported provider: {record.provider}")
 
     async def _connect_provider(self, record: AgentSandbox) -> Sandbox:
@@ -677,6 +686,12 @@ class SandboxService:
             )
         if record.provider == SandboxProviderType.DOCKER:
             return await DockerSandbox.connect(
+                sandbox_id=str(record.id),
+                session_id=str(record.session_id),
+                provider_sandbox_id=record.provider_sandbox_id,
+            )
+        if record.provider == SandboxProviderType.DAYTONA:
+            return await DaytonaSandbox.connect(
                 sandbox_id=str(record.id),
                 session_id=str(record.session_id),
                 provider_sandbox_id=record.provider_sandbox_id,

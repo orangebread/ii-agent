@@ -24,6 +24,7 @@ class SecretKey(str, Enum):
     STRIPE_SECRET_KEY = "stripe-secret-key"
     STRIPE_WEBHOOK_SECRET = "stripe-webhook-secret"
     SANDBOX_E2B_API_KEY = "e2b-api-key"
+    SANDBOX_DAYTONA_API_KEY = "daytona-api-key"
     MCP_OAUTH_CLIENT_SECRET = "mcp-oauth-client-secret"
     COMPOSIO_API_KEY = "composio-api-key"
     COMPOSIO_ENCRYPTION_KEY = "composio-encryption-key"
@@ -70,6 +71,7 @@ LLM_SECRETS = {SecretKey.JWT_SECRET_KEY}
 
 TOOL_SERVER_SECRETS = {
     SecretKey.SANDBOX_E2B_API_KEY,
+    SecretKey.SANDBOX_DAYTONA_API_KEY,
     SecretKey.A2A_SANDBOX_API_KEY,
 }
 

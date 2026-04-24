@@ -19,3 +19,4 @@ class SandboxProviderType(StrEnum):
 
     E2B = "e2b"
     DOCKER = "docker"
+    DAYTONA = "daytona"

@@ -10,7 +10,7 @@ import uuid
 from enum import StrEnum
 from typing import Annotated, Any, Literal, Union
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ii_agent.agents.types import AgentType
 
@@ -249,8 +249,26 @@ class ContinueRunContent(BaseModel):
 
     command: Literal[CommandType.CONTINUE_RUN] = CommandType.CONTINUE_RUN
     run_id: str
-    confirmed: bool
-    user_input: dict[str, str] = {}
+    confirmed: bool | None = None
+    decision: Literal["approve_once", "approve_session", "reject", "cancel"] | None = None
+    user_input: dict[str, str] = Field(default_factory=dict)
+    policy_patch: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_decision_surface(self) -> "ContinueRunContent":
+        if self.confirmed is None and self.decision is None:
+            raise ValueError("Either confirmed or decision is required")
+        return self
+
+    @property
+    def resolved_decision(self) -> Literal["approve_once", "approve_session", "reject", "cancel"]:
+        if self.decision is not None:
+            return self.decision
+        return "approve_once" if self.confirmed else "reject"
+
+    @property
+    def is_confirmation_positive(self) -> bool:
+        return self.resolved_decision in {"approve_once", "approve_session"}
 
 
 # ---------------------------------------------------------------------------

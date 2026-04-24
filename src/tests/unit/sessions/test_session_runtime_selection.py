@@ -70,7 +70,7 @@ def _make_session(session_id: uuid.UUID, user_id: uuid.UUID):
 
 
 @pytest.mark.asyncio
-async def test_validate_and_prepare_for_run_syncs_runtime_to_selected_provider_model():
+async def test_validate_and_prepare_for_run_backfills_agent_runtime_defaults_once():
     session_id = uuid.uuid4()
     user_id = uuid.uuid4()
     model_setting_id = uuid.uuid4()
@@ -135,6 +135,82 @@ async def test_validate_and_prepare_for_run_syncs_runtime_to_selected_provider_m
     assert session.model_setting_id == model_setting_id
     assert session.mcp_setting_id == runtime_setting_id
     assert session.agent_type == "codex"
+    assert result.runtime_setting_id == runtime_setting_id
+    assert result.runtime_profile is not None
+    assert result.runtime_profile.runtime_product == "codex"
+    assert result.runtime_capabilities is not None
+    assert result.runtime_capabilities.supports_platform_plan is True
+    assert result.runtime_capabilities.supports_platform_plan_modification is True
+    assert result.runtime_capabilities.supports_pause_resume is True
+    assert result.runtime_capabilities.supports_approvals is True
+    assert result.runtime_capabilities.supports_user_input is True
+    assert result.runtime_capabilities.supports_dynamic_tools is True
+
+
+@pytest.mark.asyncio
+async def test_validate_and_prepare_for_run_does_not_rebind_existing_agent_session_defaults():
+    session_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    existing_model_setting_id = uuid.uuid4()
+    existing_runtime_setting_id = uuid.uuid4()
+    requested_model_setting_id = uuid.uuid4()
+    requested_runtime_setting_id = uuid.uuid4()
+    session = _make_session(session_id, user_id)
+    session.model_setting_id = existing_model_setting_id
+    session.mcp_setting_id = existing_runtime_setting_id
+    session.agent_type = "general"
+    service = _make_service(session)
+    db = SimpleNamespace()
+
+    async def _flush():
+        return None
+
+    db.flush = _flush
+
+    model_config = ModelConfig(
+        id=requested_model_setting_id,
+        model_id="gpt-5.4",
+        provider=Provider.OPENAI,
+        provider_connection_id=uuid.uuid4(),
+        runtime_product="codex",
+        config_type=ConfigType.USER,
+        credential_source=CredentialSource.PROVIDER_OAUTH,
+    )
+    model_setting_service = SimpleNamespace(
+        resolve_model_config=AsyncMock(return_value=model_config),
+    )
+    mcp_setting_service = SimpleNamespace(
+        resolve_runtime_setting_for_run=AsyncMock(
+            return_value=SimpleNamespace(id=requested_runtime_setting_id)
+        ),
+    )
+
+    with patch("ii_agent.sessions.service.sa_inspect") as mock_inspect:
+        mock_state = MagicMock()
+        mock_state.unloaded = {"project"}
+        mock_inspect.return_value = mock_state
+
+        result = await service.validate_and_prepare_for_run(
+            db,
+            session_id=session_id,
+            user_id=user_id,
+            source="user",
+            model_id=str(requested_model_setting_id),
+            text="Use Codex for this run",
+            agent_type="codex",
+            credit_service=FakeCreditService(),
+            model_setting_service=model_setting_service,
+            mcp_setting_service=mcp_setting_service,
+        )
+
+    assert result.is_valid is True
+    assert session.model_setting_id == existing_model_setting_id
+    assert session.mcp_setting_id == existing_runtime_setting_id
+    assert session.agent_type == "general"
+    assert result.runtime_setting_id == requested_runtime_setting_id
+    assert result.runtime_profile is not None
+    assert result.runtime_profile.mcp_setting_id == requested_runtime_setting_id
+    assert result.runtime_profile.runtime_product == "codex"
 
 
 @pytest.mark.asyncio

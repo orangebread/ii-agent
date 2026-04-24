@@ -36,6 +36,7 @@ _SECRET_FIELD_MAP: dict[str, tuple[str | None, str]] = {
     "STRIPE_SECRET_KEY": ("stripe", "secret_key"),
     "STRIPE_WEBHOOK_SECRET": ("stripe", "webhook_secret"),
     "SANDBOX_E2B_API_KEY": ("sandbox", "e2b_api_key"),
+    "SANDBOX_DAYTONA_API_KEY": ("sandbox", "daytona_api_key"),
     "MCP_OAUTH_CLIENT_SECRET": ("mcp", "oauth_client_secret"),
     "COMPOSIO_API_KEY": (None, "composio_api_key"),
     "COMPOSIO_ENCRYPTION_KEY": (None, "composio_encryption_key"),
@@ -75,7 +76,7 @@ class GCPSecretManagerSource(PydanticBaseSettingsSource):
 
         try:
             from ii_agent.core.secrets.provider import GCPSecretProvider
-            from ii_agent.core.secrets.keys import SecretKey, ALL_SECRETS
+            from ii_agent.core.secrets.keys import ALL_SECRETS
 
             provider = GCPSecretProvider(
                 project_id=self._project_id,

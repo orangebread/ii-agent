@@ -134,6 +134,7 @@ class PlanModificationSuggestionsTool(BaseAgentTool):
                     "suggestions": suggestions,
                 },
                 is_error=False,
+                is_interrupted=True,
             )
 
         except Exception as e:

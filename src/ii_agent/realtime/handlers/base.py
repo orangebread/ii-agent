@@ -37,8 +37,8 @@ from ii_agent.realtime.events.app_events import (
 from ii_agent.realtime.events.converter import convert_agent_event_to_realtime
 from ii_agent.realtime.pubsub.asyncio_pubsub import AsyncIOPubSub
 from ii_agent.realtime.schemas import CommandType, EmptyContent, BaseCommandQuery
-from ii_agent.sessions.schemas import SessionInfo
-from ii_agent.tasks.schemas import RunTaskResponse
+from ii_agent.sessions.schemas import SessionInfo, ValidatedSessionResult
+from ii_agent.tasks.schemas import RunExecutionBinding, RunTaskResponse
 from ii_agent.tasks.types import RunStatus, TaskType
 
 Publish = Callable[[BaseEvent], Coroutine[Any, Any, None]]
@@ -144,7 +144,7 @@ class BaseCommandHandler(ABC, Generic[TContent]):
         self,
         session_info: SessionInfo,
         query_command: BaseCommandQuery,
-    ) -> tuple[bool, SessionInfo | None, ModelConfig | None]:
+    ) -> ValidatedSessionResult:
         """Validate session exists, user has credits, update session name.
 
         Delegates to ``SessionService.validate_and_prepare_for_run()`` and
@@ -178,9 +178,29 @@ class BaseCommandHandler(ABC, Generic[TContent]):
                 session_info.id,
                 error_code=error_map.get(result.error_code, ErrorCode.INTERNAL_ERROR),
             )
-            return False, result.session_info, None
+            return result
 
-        return True, result.session_info, result.llm_config
+        return result
+
+    @staticmethod
+    def build_execution_binding(
+        *,
+        llm_config: ModelConfig,
+        runtime_profile,
+    ) -> RunExecutionBinding:
+        """Build a durable per-run execution binding from resolved runtime state."""
+        return RunExecutionBinding(
+            model_setting_id=llm_config.id,
+            resolved_model_id=llm_config.model_id,
+            provider=getattr(llm_config.provider, "value", str(llm_config.provider)),
+            credential_source=getattr(
+                llm_config.credential_source, "value", str(llm_config.credential_source)
+            ),
+            provider_connection_id=getattr(llm_config, "provider_connection_id", None),
+            runtime_product=getattr(llm_config, "runtime_product", None),
+            mcp_setting_id=getattr(runtime_profile, "mcp_setting_id", None),
+            runtime_profile=runtime_profile,
+        )
 
     async def create_user_message_event(
         self,
@@ -296,6 +316,7 @@ class BaseCommandHandler(ABC, Generic[TContent]):
         (e.g. update milestones, emit extra events).
         """
         run_service = self._container.run_task_service
+        checkpoint_service = self._container.run_checkpoint_service
         final_status: RunStatus | None = None
 
         async for event in event_stream:
@@ -304,8 +325,6 @@ class BaseCommandHandler(ABC, Generic[TContent]):
                 run_id=run_id,
                 session_id=session_info.id,
             )
-            if realtime_event:
-                await self.send_event(realtime_event)
 
             # --- Billing events (per-turn LLM usage) ---
             if isinstance(event, ModelTurnMetricsEvent) and event.metrics and llm_config:
@@ -372,12 +391,20 @@ class BaseCommandHandler(ABC, Generic[TContent]):
 
             if isinstance(event, RunPausedEvent):
                 final_status = RunStatus.PAUSED
+                await self._persist_pause_checkpoint_if_needed(
+                    session_info=session_info,
+                    run_id=run_id,
+                    pause_event=event,
+                )
 
             if isinstance(event, RunCancelledEvent):
                 final_status = RunStatus.CANCELLED
 
             if isinstance(event, RunErrorEvent):
                 final_status = RunStatus.FAILED
+
+            if realtime_event:
+                await self.send_event(realtime_event)
 
             if isinstance(event, RunOutput):
                 # Determine final status from the agent's run output
@@ -407,6 +434,8 @@ class BaseCommandHandler(ABC, Generic[TContent]):
 
         if final_status in [*RunStatus.terminal_states(), RunStatus.PAUSED]:
             async with get_db_session_local() as db:
+                if final_status != RunStatus.PAUSED:
+                    await checkpoint_service.clear_resume_checkpoint(db, task_id=run_id)
                 await run_service.transition_status(
                     db,
                     task_id=run_id,
@@ -415,6 +444,59 @@ class BaseCommandHandler(ABC, Generic[TContent]):
                 await db.commit()
 
         return final_status
+
+    async def _persist_pause_checkpoint_if_needed(
+        self,
+        *,
+        session_info: SessionInfo,
+        run_id: uuid.UUID,
+        pause_event: RunPausedEvent,
+    ) -> None:
+        """Persist host-owned pause state before advertising resumability."""
+        run_service = self._container.run_task_service
+        checkpoint_service = self._container.run_checkpoint_service
+
+        async with get_db_session_local() as db:
+            run_task = await run_service.get_task_by_id(db, task_id=run_id)
+            if run_task is None:
+                raise RuntimeError(
+                    f"Run task {run_id} is missing while persisting pause checkpoint."
+                )
+
+            runtime_profile = checkpoint_service.load_runtime_profile(
+                getattr(run_task, "data", None)
+            )
+            if getattr(runtime_profile, "runtime_product", None) == "codex":
+                return
+            if any(
+                isinstance(getattr(tool, "tool_name", None), str)
+                and tool.tool_name.startswith("codex_")
+                for tool in pause_event.tools or []
+            ):
+                return
+
+            pending_tool_ids = [
+                tool.tool_call_id
+                for tool in pause_event.tools or []
+                if getattr(tool, "tool_call_id", None)
+            ]
+            await checkpoint_service.write_standard_resume_checkpoint(
+                db,
+                task_id=run_id,
+                session_id=session_info.id,
+                pending_tool_ids=pending_tool_ids,
+                pause_reason=self._pause_reason_from_event(pause_event),
+            )
+            await db.commit()
+
+    @staticmethod
+    def _pause_reason_from_event(event: RunPausedEvent) -> str:
+        """Classify the pause reason for checkpoint metadata."""
+        if event.tools_requiring_confirmation:
+            return "approval"
+        if event.tools_requiring_user_input:
+            return "user_input"
+        return "paused"
 
     @staticmethod
     def _extract_tool_cost(event: ToolCallCompletedEvent) -> float:

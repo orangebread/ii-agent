@@ -26,6 +26,7 @@ async def test_create_builds_default_runtime_image_when_missing(monkeypatch, set
     settings = settings_factory(
         sandbox={
             "docker_image": "ii-agent-codex-sandbox:local",
+            "codex_cli_version": "0.124.0",
             "timeout_seconds": 900,
             "user": "/home/user",
         }
@@ -56,7 +57,7 @@ async def test_create_builds_default_runtime_image_when_missing(monkeypatch, set
     assert sandbox.provider_sandbox_id == "container-123"
     assert sandbox.status == SandboxStatus.RUNNING
     assert calls[2][0][:3] == ["docker", "build", "-t"]
-    assert b"@openai/codex" in (calls[2][1] or b"")
+    assert b"@openai/codex@0.124.0" in (calls[2][1] or b"")
     assert calls[3][0][:3] == ["docker", "run", "-d"]
     assert "ii_agent.managed=true" in calls[3][0]
     assert "ii_agent.role=sandbox" in calls[3][0]

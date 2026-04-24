@@ -10,7 +10,7 @@ Web application: [agent.ii.inc](https://agent.ii.inc/)
 
 ### 1. Full-Stack Development
 
-The agent scaffolds, develops, and deploys complete web applications in isolated E2B sandboxes. Users iterate conversationally — "add a login page", "change the color scheme", "deploy to production" — while the agent handles code generation, file management, and Cloud Run deployment.
+The agent scaffolds, develops, and deploys complete web applications in isolated sandbox providers such as E2B or self-hosted Daytona. Users iterate conversationally — "add a login page", "change the color scheme", "deploy to production" — while the agent handles code generation, file management, and Cloud Run deployment.
 
 **Key domains:** `agent/`, `projects/`, `files/`, `integrations/connectors/`
 

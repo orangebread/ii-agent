@@ -204,6 +204,11 @@ def _mock_container(**overrides) -> MagicMock:
     container.run_task_service.get_task_by_id = AsyncMock(return_value=None)
     container.run_task_service.create_task = AsyncMock()
     container.run_task_service.update_task_status = AsyncMock()
+    container.run_checkpoint_service = MagicMock()
+    container.run_checkpoint_service.write_standard_resume_checkpoint = AsyncMock()
+    container.run_checkpoint_service.clear_resume_checkpoint = AsyncMock()
+    container.run_checkpoint_service.load_execution_binding = MagicMock(return_value=None)
+    container.run_checkpoint_service.load_resume_checkpoint = MagicMock(return_value=None)
     container.event_service = MagicMock()
     container.event_service.save_event = AsyncMock()
     container.file_service = MagicMock()
@@ -2060,7 +2065,10 @@ class TestContinueRunHandlerHandle:
 
         errors = stream.events_of_name("system.error")
         assert len(errors) >= 1
-        assert "confirmed" in errors[0].content["message"]
+        assert (
+            "confirmed" in errors[0].content["message"]
+            or "decision" in errors[0].content["message"]
+        )
 
     @pytest.mark.asyncio
     async def test_sends_agent_continue_event_then_run_not_found(self):
@@ -2247,3 +2255,290 @@ class TestContinueRunHandlerHandle:
         kwargs = create_agent_mock.await_args.kwargs
         assert kwargs["tool_args"] == {"browser": True, "deep_research": False}
         assert kwargs["metadata"] == {"entry": "query"}
+
+    @pytest.mark.asyncio
+    async def test_continue_run_uses_execution_binding_when_session_defaults_drift(self):
+        from ii_agent.realtime.handlers.continue_run import ContinueRunHandler
+        from ii_agent.tasks.schemas import RunExecutionBinding
+        from ii_agent.core.runtime_capabilities import RuntimeCapabilities, RuntimeProfile
+
+        stream = CapturingEventStream()
+        container = _mock_container()
+        llm_config = MagicMock()
+        llm_config.is_user_model.return_value = False
+        container.model_setting_service.resolve_config_by_setting_id = AsyncMock(
+            return_value=llm_config
+        )
+        bound_model_setting_id = uuid.uuid4()
+        container.run_task_service.get_task_by_id = AsyncMock(
+            return_value=SimpleNamespace(data={"metadata": {"entry": "query"}})
+        )
+        container.run_checkpoint_service.load_execution_binding.return_value = RunExecutionBinding(
+            model_setting_id=bound_model_setting_id,
+            resolved_model_id="gpt-5.4",
+            provider="openai",
+            credential_source="provider_oauth",
+            runtime_product=None,
+            runtime_profile=RuntimeProfile(
+                runtime_product=None,
+                provider="openai",
+                credential_source="provider_oauth",
+                capabilities=RuntimeCapabilities(
+                    supports_platform_plan=True,
+                    supports_pause_resume=True,
+                    supports_approvals=True,
+                    supports_user_input=True,
+                    supports_connector_injection=True,
+                    supports_sub_agents=True,
+                ),
+            ),
+        )
+
+        handler = ContinueRunHandler(pubsub=stream, container=container)
+        handler.process_agent_event_stream = AsyncMock()
+        handler._create_skill_creator = MagicMock(return_value=None)
+
+        session_info = _make_session_info()
+        session_info.model_setting_id = None
+        run_id = str(uuid.uuid4())
+
+        run_response = MagicMock(
+            run_id=run_id,
+            tools=[],
+            tools_requiring_confirmation=[],
+            tools_requiring_user_input=[],
+        )
+        mock_store = MagicMock()
+        mock_store.get_by_run_id = AsyncMock(return_value=run_response)
+
+        mock_agent = MagicMock()
+        mock_agent.acontinue_run = MagicMock(return_value=object())
+
+        with (
+            patch("ii_agent.realtime.handlers.continue_run.AgentSessionStore") as mock_store_cls,
+            patch("ii_agent.realtime.handlers.continue_run.get_db_session_local", new=_noop_db_cm),
+            patch(
+                "ii_agent.realtime.handlers.continue_run.agent_factory.create_agent",
+                new=AsyncMock(return_value=mock_agent),
+            ),
+        ):
+            mock_store_cls.return_value = mock_store
+
+            await handler.dispatch({"run_id": run_id, "confirmed": True}, session_info)
+
+        container.model_setting_service.resolve_config_by_setting_id.assert_awaited_once()
+        assert (
+            container.model_setting_service.resolve_config_by_setting_id.await_args.kwargs[
+                "setting_id"
+            ]
+            == bound_model_setting_id
+        )
+
+    @pytest.mark.asyncio
+    async def test_continue_run_accepts_additive_decision_payload(self):
+        from ii_agent.agents.models.response import ToolExecution
+        from ii_agent.realtime.handlers.continue_run import ContinueRunHandler
+
+        stream = CapturingEventStream()
+        container = _mock_container()
+        llm_config = MagicMock()
+        llm_config.is_user_model.return_value = False
+        container.model_setting_service.resolve_config_by_setting_id = AsyncMock(
+            return_value=llm_config
+        )
+        container.run_task_service.get_task_by_id = AsyncMock(return_value=SimpleNamespace(data={}))
+
+        handler = ContinueRunHandler(pubsub=stream, container=container)
+        handler.process_agent_event_stream = AsyncMock()
+        handler._create_skill_creator = MagicMock(return_value=None)
+
+        session_info = _make_session_info()
+        session_info.model_setting_id = uuid.uuid4()
+        run_id = str(uuid.uuid4())
+        tool = ToolExecution(
+            tool_call_id="call_1",
+            tool_name="write_file",
+            requires_confirmation=True,
+        )
+        run_response = MagicMock(
+            run_id=run_id,
+            tools=[tool],
+            tools_requiring_confirmation=[tool],
+            tools_requiring_user_input=[],
+        )
+        mock_store = MagicMock()
+        mock_store.get_by_run_id = AsyncMock(return_value=run_response)
+        mock_agent = MagicMock()
+        mock_agent.acontinue_run = MagicMock(return_value=object())
+
+        with (
+            patch("ii_agent.realtime.handlers.continue_run.AgentSessionStore") as mock_store_cls,
+            patch("ii_agent.realtime.handlers.continue_run.get_db_session_local", new=_noop_db_cm),
+            patch(
+                "ii_agent.realtime.handlers.continue_run.agent_factory.create_agent",
+                new=AsyncMock(return_value=mock_agent),
+            ),
+        ):
+            mock_store_cls.return_value = mock_store
+
+            await handler.dispatch(
+                {
+                    "run_id": run_id,
+                    "decision": "approve_session",
+                },
+                session_info,
+            )
+
+        continue_events = stream.events_of_name("agent.continue")
+        assert continue_events
+        assert continue_events[0].content["decision"] == "approve_session"
+        assert tool.confirmed is True
+
+    @pytest.mark.asyncio
+    async def test_continue_run_routes_codex_approvals_through_resume_checkpoint(self):
+        from ii_agent.realtime.handlers.continue_run import ContinueRunHandler
+        from ii_agent.tasks.schemas import CodexResumeCheckpoint
+
+        stream = CapturingEventStream()
+        container = _mock_container()
+        llm_config = MagicMock(runtime_product="codex")
+        llm_config.is_user_model.return_value = False
+        container.model_setting_service.resolve_config_by_setting_id = AsyncMock(
+            return_value=llm_config
+        )
+        run_id = str(uuid.uuid4())
+        checkpoint = CodexResumeCheckpoint(
+            thread_id="thr_123",
+            turn_id="turn_123",
+            pending_request_id="req_123",
+            pending_request_kind="approval",
+            request_payload={
+                "method": "item/commandExecution/requestApproval",
+                "itemId": "item_123",
+                "threadId": "thr_123",
+                "turnId": "turn_123",
+            },
+            allowed_decisions=["accept", "decline", "cancel"],
+        )
+        container.run_task_service.get_task_by_id = AsyncMock(
+            return_value=SimpleNamespace(
+                data={
+                    "tool_args": {"browser": True},
+                    "metadata": {"entry": "query"},
+                }
+            )
+        )
+        container.run_checkpoint_service.load_resume_checkpoint.return_value = checkpoint
+
+        handler = ContinueRunHandler(pubsub=stream, container=container)
+        handler.process_agent_event_stream = AsyncMock()
+        handler._create_skill_creator = MagicMock(return_value=None)
+
+        session_info = _make_session_info()
+        session_info.model_setting_id = uuid.uuid4()
+
+        mock_agent = MagicMock()
+        mock_agent.acontinue_run = MagicMock(return_value=object())
+        create_agent_mock = AsyncMock(return_value=mock_agent)
+
+        with (
+            patch(
+                "ii_agent.realtime.handlers.continue_run.AgentSessionStore",
+                side_effect=AssertionError("standard session store should not be used for codex"),
+            ),
+            patch("ii_agent.realtime.handlers.continue_run.get_db_session_local", new=_noop_db_cm),
+            patch(
+                "ii_agent.realtime.handlers.continue_run.agent_factory.create_agent",
+                new=create_agent_mock,
+            ),
+        ):
+            await handler.dispatch(
+                {
+                    "run_id": run_id,
+                    "decision": "approve_session",
+                    "policy_patch": {"execpolicy_amendment": ["bash", "-lc", "pytest"]},
+                },
+                session_info,
+            )
+
+        create_agent_mock.assert_awaited_once()
+        mock_agent.acontinue_run.assert_called_once_with(
+            run_id=run_id,
+            stream=True,
+            decision="approve_session",
+            user_input={},
+            policy_patch={"execpolicy_amendment": ["bash", "-lc", "pytest"]},
+            resume_checkpoint=checkpoint,
+        )
+        handler.process_agent_event_stream.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_continue_run_routes_codex_user_input_through_resume_checkpoint(self):
+        from ii_agent.realtime.handlers.continue_run import ContinueRunHandler
+        from ii_agent.tasks.schemas import CodexResumeCheckpoint
+
+        stream = CapturingEventStream()
+        container = _mock_container()
+        llm_config = MagicMock(runtime_product="codex")
+        llm_config.is_user_model.return_value = False
+        container.model_setting_service.resolve_config_by_setting_id = AsyncMock(
+            return_value=llm_config
+        )
+        run_id = str(uuid.uuid4())
+        checkpoint = CodexResumeCheckpoint(
+            thread_id="thr_123",
+            turn_id="turn_123",
+            pending_request_id="req_input",
+            pending_request_kind="user_input",
+            request_payload={
+                "method": "item/tool/requestUserInput",
+                "itemId": "call_123",
+                "threadId": "thr_123",
+                "turnId": "turn_123",
+            },
+        )
+        container.run_task_service.get_task_by_id = AsyncMock(
+            return_value=SimpleNamespace(data={"metadata": {"entry": "query"}})
+        )
+        container.run_checkpoint_service.load_resume_checkpoint.return_value = checkpoint
+
+        handler = ContinueRunHandler(pubsub=stream, container=container)
+        handler.process_agent_event_stream = AsyncMock()
+        handler._create_skill_creator = MagicMock(return_value=None)
+
+        session_info = _make_session_info()
+        session_info.model_setting_id = uuid.uuid4()
+
+        mock_agent = MagicMock()
+        mock_agent.acontinue_run = MagicMock(return_value=object())
+        create_agent_mock = AsyncMock(return_value=mock_agent)
+
+        with (
+            patch(
+                "ii_agent.realtime.handlers.continue_run.AgentSessionStore",
+                side_effect=AssertionError("standard session store should not be used for codex"),
+            ),
+            patch("ii_agent.realtime.handlers.continue_run.get_db_session_local", new=_noop_db_cm),
+            patch(
+                "ii_agent.realtime.handlers.continue_run.agent_factory.create_agent",
+                new=create_agent_mock,
+            ),
+        ):
+            await handler.dispatch(
+                {
+                    "run_id": run_id,
+                    "confirmed": True,
+                    "user_input": {"choice": "Supabase"},
+                },
+                session_info,
+            )
+
+        mock_agent.acontinue_run.assert_called_once_with(
+            run_id=run_id,
+            stream=True,
+            decision="approve_once",
+            user_input={"choice": "Supabase"},
+            policy_patch=None,
+            resume_checkpoint=checkpoint,
+        )
+        handler.process_agent_event_stream.assert_awaited_once()

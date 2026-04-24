@@ -302,6 +302,76 @@ async def test_connect_provider_routes_docker_records_to_docker_provider(
 
 
 @pytest.mark.asyncio
+async def test_create_provider_routes_daytona_records_to_daytona_provider(
+    settings_factory, monkeypatch
+):
+    session_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        provider=SandboxProviderType.DAYTONA,
+        provider_sandbox_id=None,
+    )
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(sandbox={"provider": "daytona"}),
+    )
+    expected = SimpleNamespace(provider_sandbox_id="daytona-123")
+    create = AsyncMock(return_value=expected)
+    monkeypatch.setattr("ii_agent.agents.sandboxes.service.DaytonaSandbox.create", create)
+
+    result = await service._create_provider(record, metadata={"tool": "codex"})
+
+    assert result is expected
+    create.assert_awaited_once_with(
+        sandbox_id=str(record.id),
+        session_id=str(record.session_id),
+        metadata={"tool": "codex"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_connect_provider_routes_daytona_records_to_daytona_provider(
+    settings_factory, monkeypatch
+):
+    session_id = uuid.uuid4()
+    record = SimpleNamespace(
+        id=uuid.uuid4(),
+        session_id=session_id,
+        provider=SandboxProviderType.DAYTONA,
+        provider_sandbox_id="daytona-123",
+    )
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(sandbox={"provider": "daytona"}),
+    )
+    expected = SimpleNamespace(provider_sandbox_id="daytona-123")
+    connect = AsyncMock(return_value=expected)
+    monkeypatch.setattr("ii_agent.agents.sandboxes.service.DaytonaSandbox.connect", connect)
+
+    result = await service._connect_provider(record)
+
+    assert result is expected
+    connect.assert_awaited_once_with(
+        sandbox_id=str(record.id),
+        session_id=str(record.session_id),
+        provider_sandbox_id="daytona-123",
+    )
+
+
+def test_resolve_provider_supports_daytona(settings_factory):
+    service = SandboxService(
+        sandbox_repo=FakeSandboxRepo({}),
+        session_repo=FakeSessionRepo({}),
+        config=settings_factory(sandbox={"provider": "daytona"}),
+    )
+
+    assert service._resolve_provider() == SandboxProviderType.DAYTONA
+
+
+@pytest.mark.asyncio
 async def test_get_sandbox_by_session_id_aliases_existing_lookup(settings_factory, monkeypatch):
     session_id = uuid.uuid4()
     expected_sandbox = SimpleNamespace(provider_sandbox_id="sbx-1")

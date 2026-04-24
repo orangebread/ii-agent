@@ -149,6 +149,33 @@ class RunTaskService:
 
         return RunTaskResponse.model_validate(task)
 
+    async def update_task_data(
+        self,
+        db: AsyncSession,
+        *,
+        task_id: uuid.UUID,
+        updates: Dict[str, Any],
+    ) -> Optional[RunTaskResponse]:
+        """Merge task metadata updates, preserving existing keys unless cleared."""
+        task = await self._task_repo.get_by_id(db, task_id)
+        if not task:
+            return None
+
+        merged_data: Dict[str, Any] = dict(task.data or {})
+        for key, value in updates.items():
+            if value is None:
+                merged_data.pop(key, None)
+            else:
+                merged_data[key] = value
+
+        task.data = merged_data or None
+        task = await self._task_repo.update(db, task)
+
+        _cached_key = KEY_PATTERN.format(task_id=str(task_id))
+        await self._cache.evict(_cached_key)
+
+        return RunTaskResponse.model_validate(task)
+
     # ── Logs ───────────────────────────────────────────────────────────────
 
     async def get_logs(self, db: AsyncSession, task_id: uuid.UUID) -> list[TaskLogResponse]:

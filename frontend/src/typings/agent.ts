@@ -854,7 +854,8 @@ interface InitAgentPayload {
 interface ContinueRunPayload {
     command: CommandType.CONTINUE_RUN
     run_id: string
-    confirmed: boolean
+    confirmed?: boolean
+    decision?: 'approve_once' | 'approve_session' | 'reject' | 'cancel'
     user_input?: Record<string, string>
 }
 

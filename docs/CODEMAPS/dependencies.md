@@ -9,7 +9,7 @@
 | Redis | Cache, pubsub, cancel tokens | `core/config/redis.py::RedisSettings` |
 | Google Cloud Storage | File storage (prod) | `core/config/storage.py::StorageSettings` |
 | Stripe | Payments, subscriptions | `core/config/stripe.py::StripeSettings` |
-| E2B | Sandbox execution (prod) | `core/config/sandbox.py::SandboxSettings` |
+| E2B / Daytona | Sandbox execution providers | `core/config/sandbox.py::SandboxSettings` |
 | Anthropic | Claude LLM provider | via `anthropic[vertex]` |
 | OpenAI | GPT models + embeddings | via `openai` |
 | Google GenAI | Gemini models | via `google-genai` |
@@ -27,7 +27,7 @@ Main: `core/config/settings.py::Settings` (Pydantic BaseSettings, `@lru_cache` s
 | `DatabaseSettings` | `core/config/database.py` | url, pool_size, timeout |
 | `RedisSettings` | `core/config/redis.py` | url, mode |
 | `StorageSettings` | `core/config/storage.py` | provider (gcs/local), bucket, domain |
-| `SandboxSettings` | `core/config/sandbox.py` | provider (e2b/docker/local), api_key, template |
+| `SandboxSettings` | `core/config/sandbox.py` | provider (e2b/docker/daytona/local), api_key, template/image/snapshot |
 | `StripeSettings` | `core/config/stripe.py` | secret_key, webhook_secret, price_ids |
 | `OAuth2Settings` | `core/config/oauth.py` | client_ids, secrets, redirect_uris |
 | `LLMConfig` | `core/config/llm_config.py` | model pricing, token limits |

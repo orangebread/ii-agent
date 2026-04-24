@@ -28,6 +28,7 @@ SECRET_TO_SETTINGS: dict[SecretKey, tuple[str | None, str]] = {
     SecretKey.STRIPE_SECRET_KEY: ("stripe", "secret_key"),
     SecretKey.STRIPE_WEBHOOK_SECRET: ("stripe", "webhook_secret"),
     SecretKey.SANDBOX_E2B_API_KEY: ("sandbox", "e2b_api_key"),
+    SecretKey.SANDBOX_DAYTONA_API_KEY: ("sandbox", "daytona_api_key"),
     SecretKey.MCP_OAUTH_CLIENT_SECRET: ("mcp", "oauth_client_secret"),
     SecretKey.COMPOSIO_API_KEY: (None, "composio_api_key"),
     SecretKey.COMPOSIO_ENCRYPTION_KEY: (None, "composio_encryption_key"),

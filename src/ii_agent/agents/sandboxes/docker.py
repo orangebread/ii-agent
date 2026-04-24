@@ -53,13 +53,29 @@ from ii_agent.core.logger import logger
 
 
 _DEFAULT_RUNTIME_IMAGE = "ii-agent-codex-sandbox:local"
+_DEFAULT_CODEX_CLI_VERSION = "0.124.0"
 _RUNTIME_BUILD_LOCK = asyncio.Lock()
 _RUNTIME_CANDIDATES = ("podman", "docker")
 _CONTAINER_START_CMD = (
     "mkdir -p /app /workspace /home/user/.codex && touch /app/.user_env.sh && sleep infinity"
 )
-_RUNTIME_DOCKERFILE = f"""
+
+
+def _codex_cli_package_spec(config: Settings) -> str:
+    version = str(
+        getattr(config.sandbox, "codex_cli_version", _DEFAULT_CODEX_CLI_VERSION)
+        or _DEFAULT_CODEX_CLI_VERSION
+    ).strip()
+    return f"@openai/codex@{version}" if version else "@openai/codex"
+
+
+def _runtime_dockerfile(config: Settings) -> str:
+    codex_package = _codex_cli_package_spec(config)
+    quoted_codex_package = shlex.quote(codex_package)
+    return f"""
 FROM node:22-bookworm
+
+LABEL ii_agent.codex_cli_package={json.dumps(codex_package)}
 
 RUN apt-get update \\
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \\
@@ -75,13 +91,15 @@ RUN apt-get update \\
         tar \\
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm i -g @openai/codex@latest
+RUN npm i -g {quoted_codex_package}
 RUN mkdir -p /app /workspace /home/user/.codex && touch /app/.user_env.sh
 
 ENV HOME=/home/user
 WORKDIR /workspace
 CMD ["bash", "-lc", "{_CONTAINER_START_CMD}"]
 """.strip()
+
+
 _FILE_WRITE_SCRIPT = """
 from pathlib import Path
 import sys
@@ -904,7 +922,7 @@ class DockerSandbox(Sandbox):
             logger.info("Building local Docker sandbox image %s", image)
             build_result = await _run_subprocess(
                 [runtime_binary, "build", "-t", image, "-"],
-                input_bytes=_RUNTIME_DOCKERFILE.encode("utf-8"),
+                input_bytes=_runtime_dockerfile(config).encode("utf-8"),
                 timeout=1800,
             )
             if build_result.exit_code != 0:
